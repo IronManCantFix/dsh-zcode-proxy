@@ -191,6 +191,48 @@ export function mapFinishReason(stopReason) {
 }
 
 /**
+ * Translate an Anthropic usage object into the host's `TokenUsage`.
+ *
+ * The two vocabularies differ and the host reads its own: forwarding the
+ * upstream object verbatim would leave every count `undefined`, so token
+ * accounting and cost display would silently read as zero. Fields the vendor
+ * omits are left out rather than defaulted, so the host can tell "not reported"
+ * from "reported as zero".
+ *
+ * @param {Record<string, unknown> | undefined} usage
+ * @returns {Record<string, number> | undefined}
+ */
+export function toHostUsage(usage) {
+  if (!usage || typeof usage !== 'object') {
+    return undefined
+  }
+
+  /** @type {Record<string, number>} */
+  const mapped = {}
+  const copy = (from, to) => {
+    const value = usage[from]
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      mapped[to] = value
+    }
+  }
+
+  copy('input_tokens', 'inputTokens')
+  copy('output_tokens', 'outputTokens')
+  copy('cache_read_input_tokens', 'cacheReadTokens')
+  copy('cache_creation_input_tokens', 'cacheWriteTokens')
+
+  if (mapped.inputTokens === undefined && mapped.outputTokens === undefined) {
+    return undefined
+  }
+
+  // The host can derive the total, but supplying it keeps the two sides from
+  // disagreeing when only some fields were reported.
+  mapped.totalTokens =
+    (mapped.inputTokens ?? 0) + (mapped.outputTokens ?? 0)
+  return mapped
+}
+
+/**
  * The adapter registered with the host.
  *
  * Only `stream` is abstract on `LlmAdapter`; the rest carry working defaults in
@@ -240,17 +282,30 @@ export class ZcodeAdapter {
   }
 
   /**
-   * @param {string} _provider
+   * Resolve metadata for one exact model.
+   *
+   * The host's `LlmResolvedModelInfo` extends `LlmModelInfo` with a *nested*
+   * `context` object and a `defaultMaxTokens` field — it is not the flat shape
+   * `LlmDiscoveredModel` uses for discovery. Spreading the flat names here
+   * would leave the host reading `undefined` for both the context window and
+   * the default output limit.
+   *
+   * @param {string} provider
    * @param {string} model
    */
-  resolveModel(_provider, model) {
+  resolveModel(provider, model) {
     const meta = metadataFor(canonicalModelId(model))
     return Promise.resolve({
+      provider,
       id: meta.id,
       name: meta.name,
-      contextWindow: meta.contextWindow,
-      maxTokens: meta.maxOutputTokens,
+      context: { contextWindow: meta.contextWindow },
+      defaultMaxTokens: meta.maxOutputTokens,
       inputModalities: meta.supportsImages ? ['text', 'image'] : ['text'],
+      reasoning: {
+        efforts: meta.reasoningLevels.map((level) => ({ id: level, name: level })),
+        ...(meta.reasoningLevels.includes('high') ? { defaultEffort: 'high' } : {}),
+      },
     })
   }
 
@@ -260,7 +315,11 @@ export class ZcodeAdapter {
    */
   prepareCall(provider, model) {
     return Promise.resolve({
-      model: { id: model, provider },
+      model: {
+        provider,
+        id: canonicalModelId(model),
+        name: metadataFor(canonicalModelId(model)).name,
+      },
       stream: (options) => this.stream(options),
     })
   }
@@ -305,6 +364,7 @@ export class ZcodeAdapter {
 
     /** Tracks which block index is currently open, keyed by upstream index. */
     const openBlocks = new Map()
+    /** Anthropic-shaped usage, normalised for the host on the way out. */
     /** @type {Record<string, unknown> | undefined} */
     let usage
     let stopReason
@@ -403,8 +463,9 @@ export class ZcodeAdapter {
       }
     }
 
-    if (usage) {
-      yield { type: 'usage', usage }
+    const hostUsage = toHostUsage(usage)
+    if (hostUsage) {
+      yield { type: 'usage', usage: hostUsage }
     }
 
     yield {

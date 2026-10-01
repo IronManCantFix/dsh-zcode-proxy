@@ -231,16 +231,22 @@ test('the adapter reports max_tokens as length', async () => {
   assert.equal(chunks.at(-1).reason, 'length')
 })
 
-test('the adapter emits usage before finish', async () => {
+test('the adapter emits usage before finish, in the host vocabulary', async () => {
   const chunks = await collectChunks([
-    { type: 'message_start', message: { usage: { input_tokens: 7 } } },
+    { type: 'message_start', message: { usage: { input_tokens: 7, cache_read_input_tokens: 3 } } },
     { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 2 } },
   ])
   const types = chunks.map((chunk) => chunk.type)
   assert.ok(types.indexOf('usage') < types.indexOf('finish'))
   const usage = chunks.find((chunk) => chunk.type === 'usage')
-  assert.equal(usage.usage.input_tokens, 7)
-  assert.equal(usage.usage.output_tokens, 2)
+
+  // The host's TokenUsage uses camelCase; forwarding the vendor's snake_case
+  // verbatim makes every count read as undefined.
+  assert.equal(usage.usage.inputTokens, 7)
+  assert.equal(usage.usage.outputTokens, 2)
+  assert.equal(usage.usage.cacheReadTokens, 3)
+  assert.equal(usage.usage.totalTokens, 9)
+  assert.equal(usage.usage.input_tokens, undefined, 'vendor field names must not leak through')
 })
 
 test('the adapter raises on a mid-stream error frame', async () => {

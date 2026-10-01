@@ -19,6 +19,8 @@ import {
   mapFinishReason,
   toAnthropicMessages,
   toAnthropicTools,
+  toHostUsage,
+  ZcodeAdapter,
 } from '../src/adapter.js'
 import { canonicalModelId, metadataFor, reasoningOptions } from '../src/catalog.js'
 
@@ -361,4 +363,72 @@ test('reasoningOptions builds the wire shape the plan endpoint expects', () => {
   })
   assert.deepEqual(reasoningOptions('disabled'), { thinking: { type: 'disabled' } })
   assert.equal(reasoningOptions(undefined), undefined)
+})
+
+/**
+ * `resolveModel` must return the host's `LlmResolvedModelInfo`, whose context
+ * window is nested under `context` and whose output limit is `defaultMaxTokens`.
+ * Emitting the flat `contextWindow` / `maxTokens` names of the *discovery*
+ * shape leaves the host reading `undefined` for both.
+ */
+test('resolveModel returns the host LlmResolvedModelInfo shape', async () => {
+  const adapter = new ZcodeAdapter({})
+  const model = await adapter.resolveModel('zcode', 'GLM-5.3-Flash')
+
+  assert.equal(model.provider, 'zcode')
+  assert.equal(model.id, 'GLM-5.3-Flash')
+  assert.equal(model.name, 'GLM-5.3-Flash')
+  assert.deepEqual(model.context, { contextWindow: 1_000_000 })
+  assert.equal(model.defaultMaxTokens, 128_000)
+  assert.deepEqual(model.inputModalities, ['text', 'image'])
+
+  // The flat discovery-shape names must not appear here.
+  assert.equal(model.contextWindow, undefined)
+  assert.equal(model.maxTokens, undefined)
+})
+
+test('resolveModel reports the reasoning efforts the model supports', async () => {
+  const adapter = new ZcodeAdapter({})
+
+  const flash = await adapter.resolveModel('zcode', 'glm-5.3-flash')
+  assert.deepEqual(
+    flash.reasoning.efforts.map((effort) => effort.id),
+    ['low', 'high', 'max'],
+  )
+  assert.equal(flash.reasoning.defaultEffort, 'high')
+
+  const legacy = await adapter.resolveModel('zcode', 'GLM-5')
+  assert.deepEqual(
+    legacy.reasoning.efforts.map((effort) => effort.id),
+    ['disabled', 'enabled'],
+  )
+})
+
+test('prepareCall binds the canonical model id', async () => {
+  const adapter = new ZcodeAdapter({})
+  const prepared = await adapter.prepareCall('zcode', 'glm-5.3')
+
+  assert.equal(prepared.model.provider, 'zcode')
+  assert.equal(prepared.model.id, 'GLM-5.3')
+  assert.equal(typeof prepared.stream, 'function')
+})
+
+test('toHostUsage renames vendor fields and drops an unreportable object', () => {
+  assert.deepEqual(toHostUsage({ input_tokens: 10, output_tokens: 4 }), {
+    inputTokens: 10,
+    outputTokens: 4,
+    totalTokens: 14,
+  })
+
+  assert.deepEqual(toHostUsage({ input_tokens: 1, cache_read_input_tokens: 9 }), {
+    inputTokens: 1,
+    cacheReadTokens: 9,
+    totalTokens: 1,
+  })
+
+  // Nothing the host understands: better to omit usage than to emit zeros that
+  // look like a real measurement.
+  assert.equal(toHostUsage({ something_else: 1 }), undefined)
+  assert.equal(toHostUsage(undefined), undefined)
+  assert.equal(toHostUsage(null), undefined)
 })
