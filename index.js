@@ -136,11 +136,27 @@ async function discoverModels() {
 }
 
 /**
+ * Build one discovered-model record in the shape the host validates.
+ *
+ * `provider` is NOT optional. `LlmService.listModels` checks every entry with
+ *
+ *     model.provider !== provider -> throw LlmError(..., 'INVALID_CATALOG')
+ *
+ * and the settings surface renders that failure verbatim as
+ *
+ *     ZCode 加载失败: adapter returned invalid or duplicate model metadata
+ *
+ * Omitting the field is what produced that message: the host compares against
+ * the provider route it asked about (`zcode`), so the value has to be
+ * `PROVIDER_ID` and not merely "some string".
+ *
  * @param {string} id
+ * @returns {{ provider: string, id: string, name: string, contextWindow: number, maxTokens: number, inputModalities: string[] }}
  */
 function toHostModel(id) {
   const meta = metadataFor(id)
   return {
+    provider: PROVIDER_ID,
     id: meta.id,
     name: meta.name,
     contextWindow: meta.contextWindow,
@@ -362,7 +378,13 @@ function registerRoutes(ctx) {
               resolveUrl = resolve
             })
 
-            login({
+            // The card must not re-read the status until the credential is on
+            // disk. Returning as soon as the authorize URL is known is why the
+            // settings pane used to keep showing "not signed in" until a manual
+            // refresh: the status re-read raced the detached write below and
+            // always lost. Tracking the settlement lets the handler hold the
+            // response until the store is actually updated.
+            const settled = login({
               provider,
               signal: controller.signal,
               onAuthorizeUrl: (url) => {
@@ -376,13 +398,18 @@ function registerRoutes(ctx) {
                   jwt: result.jwt,
                   savedAt: new Date().toISOString(),
                 })
+                return { signedIn: true }
               })
-              .catch(() => {
-                // The card observes the outcome through the status endpoint.
-              })
+              .catch((error) => ({
+                signedIn: false,
+                error: error instanceof Error ? error.message : String(error),
+              }))
 
             const url = await urlPromise
-            json(res, 200, { authorizeUrl: url, provider })
+            // `settled` never rejects (the catch is above), so this cannot
+            // throw; an abandoned login resolves through the abort path.
+            const outcome = await settled
+            json(res, 200, { authorizeUrl: url, provider, ...outcome })
           },
         }),
       )
@@ -457,3 +484,12 @@ export function apply(ctx) {
 }
 
 export { PROVIDER_ID, PROVIDER_NAME }
+
+/**
+ * The discovered-model builder, exposed for the contract test.
+ *
+ * The host validates this exact shape and reports a violation as
+ * `adapter returned invalid or duplicate model metadata`; a test that asserted
+ * the source text alone would not catch a wrong value, only a missing field.
+ */
+export const toHostModelForTest = toHostModel

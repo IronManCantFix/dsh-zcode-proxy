@@ -341,3 +341,81 @@ test('the wrapper falls back to the plain implementation without a base class', 
   assert.equal(adapter instanceof ZcodeAdapter, true)
   assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Connect' })
 })
+
+/**
+ * Discovered models must carry the provider they belong to.
+ *
+ * `LlmService.listModels` validates every entry the adapter returns and throws
+ *
+ *     LlmError(`adapter returned invalid or duplicate model metadata for
+ *              provider "${provider}"`, 'INVALID_CATALOG')
+ *
+ * unless `model.provider === provider`, plus a non-empty `id` and `name` and a
+ * unique `id`. The settings surface renders that verbatim, which is how a
+ * missing field here reached the user as
+ *
+ *     ZCode 加载失败: adapter returned invalid or duplicate model metadata
+ *
+ * on the model picker. The metadata builder is asserted directly because the
+ * failure is a shape contract with the host, not a behaviour of this plugin.
+ */
+test('discovered models carry provider, id and name in the host-validated shape', () => {
+  const source = readFileSync(join(ROOT, 'index.js'), 'utf8')
+  const build = source.slice(source.indexOf('function toHostModel'))
+  const body = build.slice(0, build.indexOf('\n}') + 2)
+
+  assert.match(
+    body,
+    /provider:\s*PROVIDER_ID/,
+    "toHostModel must set `provider` to PROVIDER_ID: the host compares it against the " +
+      'provider route and throws INVALID_CATALOG ("invalid or duplicate model metadata") otherwise.',
+  )
+
+  // Exercise the real builder through the module's own discovery surface so the
+  // assertion is about the returned objects, not just the source text.
+  const model = entry.toHostModelForTest('GLM-5.3-Flash')
+  assert.equal(model.provider, 'zcode', 'every discovered model must name the registering provider')
+  assert.equal(typeof model.id, 'string')
+  assert.ok(model.id.length > 0, 'the host rejects an empty id')
+  assert.equal(typeof model.name, 'string')
+  assert.ok(model.name.length > 0, 'the host rejects an empty name')
+})
+
+/**
+ * `/login` must not answer before the credential is readable.
+ *
+ * The card's sign-in handler awaits the login route and then immediately
+ * re-reads `/status`. The route used to return as soon as the authorize URL was
+ * known and finish the exchange in a detached promise, so that re-read raced
+ * the credential write and always lost: the pane kept showing "not signed in"
+ * until the user pressed Refresh by hand. The handler now awaits the exchange,
+ * which is the ordering this test pins.
+ */
+test('the login route resolves only after the credential is written', async () => {
+  const source = readFileSync(join(ROOT, 'index.js'), 'utf8')
+  const handlerStart = source.indexOf('path: ROUTES.login')
+  const handler = source.slice(handlerStart)
+  // Everything up to the close of the login handler: the assertions below need
+  // both the tracked chain and the response that follows it.
+  const body = handler.slice(0, handler.indexOf('\n        }),'))
+
+  // The login promise must be retained, so its settlement can be awaited...
+  assert.match(
+    body,
+    /const settled = login\(/,
+    'the login promise must be captured so the handler can await its settlement.',
+  )
+  // ...the credential write must happen inside that tracked chain...
+  assert.match(
+    body,
+    /\.then\(\(result\) => \{[\s\S]*?saveCredential\(/,
+    'the credential must be saved inside the tracked login chain, not a detached callback.',
+  )
+  // ...and the response must be sent only after awaiting it.
+  assert.match(
+    body,
+    /await settled[\s\S]*?json\(res, 200/,
+    'the handler must await the settled login BEFORE responding, or the card\'s post-login ' +
+      'status re-read races the credential write and shows a stale "not signed in".',
+  )
+})

@@ -36,6 +36,99 @@ export const name = 'dsh-zcode-connect-client'
 export const inject = ['slots', 'locale']
 
 /**
+ * Card copy, in the two locales the host can present.
+ *
+ * The card is written Chinese-first (the primary audience for this plugin)
+ * with English as the fallback, rather than shipping a translation layer for
+ * a surface this small. `pickText` chooses between the two at render time
+ * from the host's active locale, so the labels follow the same setting as the
+ * surrounding settings pane instead of being hardcoded to one language.
+ *
+ * @type {Record<string, { zh: string, en: string }>}
+ */
+const TEXT = {
+  loading: { zh: '加载中…', en: 'Loading…' },
+  retry: { zh: '重试', en: 'Retry' },
+  refresh: { zh: '刷新', en: 'Refresh' },
+  signOut: { zh: '退出登录', en: 'Sign out' },
+  account: { zh: '账户', en: 'Account' },
+  status: { zh: '状态', en: 'status' },
+  signedInAs: { zh: '已登录', en: 'signed in' },
+  notSignedIn: { zh: '未登录', en: 'not signed in' },
+  planToken: { zh: '套餐令牌', en: 'plan token' },
+  present: { zh: '有效', en: 'present' },
+  signedInAt: { zh: '登录时间', en: 'signed in at' },
+  storedAt: { zh: '凭据位置', en: 'stored at' },
+  identityHeading: { zh: '身份提示词', en: 'Identity prompt' },
+  size: { zh: '长度', en: 'size' },
+  characters: { zh: '字符', en: 'characters' },
+  healthy: { zh: '状态正常', en: 'healthy' },
+  yes: { zh: '是', en: 'yes' },
+  no: { zh: '否', en: 'no' },
+  quota: { zh: '额度', en: 'Quota' },
+  noBuckets: { zh: '上游未返回任何额度桶。', en: 'No quota buckets reported by upstream.' },
+  resets: { zh: '重置于', en: 'resets' },
+  signInAs: { zh: '登录', en: 'Sign in' },
+  finishAuth: { zh: '请在弹出的标签页中完成授权：', en: 'Finish the authorization in the tab that just opened:' },
+  noJwt: {
+    zh: '本次登录没有套餐令牌，因此无法使用套餐模型。请使用编码套餐订阅重新登录。',
+    en: 'This login has no plan token, so plan-backed models are unavailable. Sign in again with a coding-plan subscription.',
+  },
+  signInFailed: { zh: '登录失败', en: 'Sign-in failed' },
+  trustBuildHint: {
+    zh: 'ZCode Trust Build 套餐需要先在 ZCode 客户端中手动领取（需通过阿里云人机验证），领取成功后此处会自动显示。',
+    en: 'The ZCode Trust Build plan must first be claimed in the ZCode client (it requires an Aliyun captcha); it appears here once claimed.',
+  },
+}
+
+/**
+ * Resolve one copy string for the active locale.
+ *
+ * @param {boolean} zh
+ * @param {keyof typeof TEXT} key
+ * @returns {string}
+ */
+function pickText(zh, key) {
+  const entry = TEXT[key]
+  return zh ? entry.zh : entry.en
+}
+
+/**
+ * Decide whether the host is presenting a Chinese locale.
+ *
+ * `locale` is injected, so the runtime is guaranteed present; only the shape of
+ * what it exposes varies between host versions, and a card that throws while
+ * asking would take the whole settings pane down. Every read is therefore
+ * defensive and falls back to Chinese, which is this plugin's primary audience.
+ *
+ * @param {any} locale
+ * @returns {boolean}
+ */
+function isChinese(locale) {
+  try {
+    const snapshot = typeof locale?.get === 'function' ? locale.get() : locale
+    const candidates = [
+      snapshot?.locale,
+      snapshot?.language,
+      snapshot?.preference,
+      snapshot?.current,
+      Array.isArray(snapshot?.languages) ? snapshot.languages[0] : undefined,
+    ]
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim()) {
+        return candidate.trim().toLowerCase().startsWith('zh')
+      }
+    }
+    if (typeof navigator !== 'undefined' && typeof navigator.language === 'string') {
+      return navigator.language.toLowerCase().startsWith('zh')
+    }
+  } catch {
+    // Fall through to the default below.
+  }
+  return true
+}
+
+/**
  * @param {string} path
  * @param {{ method?: string, body?: unknown, signal?: AbortSignal }} [options]
  */
@@ -171,9 +264,12 @@ function Section({ children, style }) {
 /**
  * The card component.
  *
- * @param {{ t?: (key: string) => string }} props
+ * @param {{ t?: (key: string) => string, ctx?: any, locale?: any }} props
  */
-export function ZcodeCard() {
+export function ZcodeCard(props = {}) {
+  const zh = isChinese(props.locale ?? props.ctx?.locale)
+  const text = (key) => pickText(zh, key)
+
   const [status, setStatus] = useState(undefined)
   const [error, setError] = useState(undefined)
   const [loading, setLoading] = useState(true)
@@ -233,12 +329,19 @@ export function ZcodeCard() {
       const result = await call(ROUTES.login, { method: 'POST', body: { provider } })
       setLoginUrl(result.authorizeUrl)
       window.open(result.authorizeUrl, '_blank', 'noopener')
+      // The route now resolves only after the credential is stored, so the
+      // `refresh()` that `run` performs next already sees the signed-in state;
+      // a failed authorization is reported here rather than left to the card
+      // to infer from an unchanged status.
+      if (result.signedIn === false) {
+        throw new Error(`${text('signInFailed')}: ${result.error ?? ''}`.trim())
+      }
     })
 
   const signOut = () => run(() => call(ROUTES.logout, { method: 'POST' }))
 
   if (loading) {
-    return h('div', { style: STYLES.card }, h('p', { style: STYLES.note }, 'Loading…'))
+    return h('div', { style: STYLES.card }, h('p', { style: STYLES.note }, text('loading')))
   }
 
   if (error) {
@@ -249,7 +352,7 @@ export function ZcodeCard() {
       h(
         'div',
         { style: STYLES.buttons },
-        h('button', { type: 'button', style: STYLES.button, onClick: refresh }, 'Retry'),
+        h('button', { type: 'button', style: STYLES.button, onClick: refresh }, text('retry')),
       ),
     )
   }
@@ -266,11 +369,17 @@ export function ZcodeCard() {
     // Account
     Section({
       children: [
-        h('h4', { key: 'heading', style: STYLES.heading }, 'Account'),
-        row('status', credential.present ? `signed in (${credential.provider})` : 'not signed in'),
-        row('plan token', credential.present && credential.hasJwt ? 'present' : undefined),
-        row('signed in at', credential.savedAt ? new Date(credential.savedAt).toLocaleString() : undefined),
-        row('stored at', credential.path),
+        h('h4', { key: 'heading', style: STYLES.heading }, text('account')),
+        row(
+          text('status'),
+          credential.present ? `${text('signedInAs')} (${credential.provider})` : text('notSignedIn'),
+        ),
+        row(text('planToken'), credential.present && credential.hasJwt ? text('present') : undefined),
+        row(
+          text('signedInAt'),
+          credential.savedAt ? new Date(credential.savedAt).toLocaleString() : undefined,
+        ),
+        row(text('storedAt'), credential.path),
       ],
     }),
 
@@ -278,9 +387,9 @@ export function ZcodeCard() {
     // single most likely cause of a provider that suddenly stops working.
     Section({
       children: [
-        h('h4', { key: 'heading', style: STYLES.heading }, 'Identity prompt'),
-        row('size', `${identity.chars ?? 0} characters`),
-        row('healthy', identity.healthy ? 'yes' : 'no'),
+        h('h4', { key: 'heading', style: STYLES.heading }, text('identityHeading')),
+        row(text('size'), `${identity.chars ?? 0} ${text('characters')}`),
+        row(text('healthy'), identity.healthy ? text('yes') : text('no')),
         identity.healthy
           ? null
           : h(
@@ -295,11 +404,11 @@ export function ZcodeCard() {
     quota
       ? Section({
           children: [
-            h('h4', { key: 'heading', style: STYLES.heading }, 'Quota'),
+            h('h4', { key: 'heading', style: STYLES.heading }, text('quota')),
             quota.error
               ? h('p', { key: 'error', style: STYLES.error }, quota.error)
               : !quota.buckets || quota.buckets.length === 0
-                ? h('p', { key: 'empty', style: STYLES.note }, 'No quota buckets reported by upstream.')
+                ? h('p', { key: 'empty', style: STYLES.note }, text('noBuckets'))
                 : quota.buckets.map((bucket, index) =>
                     Section({
                       key: `bucket-${index}`,
@@ -309,11 +418,17 @@ export function ZcodeCard() {
                         h(
                           'p',
                           { key: 'plan', style: STYLES.note },
-                          `${bucket.planName}${bucket.periodEnd ? ` · resets ${formatTime(bucket.periodEnd)}` : ''}`,
+                          `${bucket.planName}${bucket.periodEnd ? ` · ${text('resets')} ${formatTime(bucket.periodEnd)}` : ''}`,
                         ),
                       ],
                     }),
                   ),
+            // Trust Build is claim-based and never appears in the balance
+            // response until it has been claimed in the ZCode client, so an
+            // account that owns it but has not claimed it looks identical to
+            // one that has no such grant. Stating that here is the difference
+            // between "the plugin is broken" and "claim it in ZCode first".
+            h('p', { key: 'trust-hint', style: STYLES.note }, text('trustBuildHint')),
           ],
         })
       : null,
@@ -323,34 +438,33 @@ export function ZcodeCard() {
       'div',
       { key: 'buttons', style: STYLES.buttons },
       credential.present
-        ? h('button', { type: 'button', style: STYLES.button, disabled: busy, onClick: signOut }, 'Sign out')
+        ? h('button', { type: 'button', style: STYLES.button, disabled: busy, onClick: signOut }, text('signOut'))
         : (view.providers ?? ['bigmodel', 'zai']).map((provider) =>
             h(
               'button',
               { key: provider, type: 'button', style: STYLES.button, disabled: busy, onClick: () => signIn(provider) },
-              `Sign in (${provider})`,
+              `${text('signInAs')} (${provider})`,
             ),
           ),
-      h('button', { key: 'refresh', type: 'button', style: STYLES.button, disabled: busy, onClick: refresh }, 'Refresh'),
+      h(
+        'button',
+        { key: 'refresh', type: 'button', style: STYLES.button, disabled: busy, onClick: refresh },
+        text('refresh'),
+      ),
     ),
 
     loginUrl
       ? Section({
           key: 'login',
           children: [
-            h('p', { key: 'note', style: STYLES.note }, 'Finish the authorization in the tab that just opened:'),
+            h('p', { key: 'note', style: STYLES.note }, text('finishAuth')),
             h('a', { key: 'link', style: STYLES.link, href: loginUrl, target: '_blank', rel: 'noopener' }, loginUrl),
           ],
         })
       : null,
 
     credential.present && !credential.hasJwt
-      ? h(
-          'p',
-          { key: 'no-jwt', style: STYLES.warning },
-          'This login has no plan token, so plan-backed models are unavailable. Sign in again with a ' +
-            'coding-plan subscription.',
-        )
+      ? h('p', { key: 'no-jwt', style: STYLES.warning }, text('noJwt'))
       : null,
   )
 }
@@ -366,7 +480,11 @@ export function apply(ctx) {
         id: 'zcode-connect',
         order: 441,
         label: () => 'ZCode',
-        inject: () => ({}),
+        // The slot's `inject` supplies the props the component receives. The
+        // locale service is passed through so the card can follow the host's
+        // language setting; it is read defensively there, since only the
+        // shape of what `locale` exposes varies between host versions.
+        inject: () => ({ locale: ctx.locale }),
       },
       ZcodeCard,
     ),
