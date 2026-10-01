@@ -5,7 +5,14 @@
  */
 
 import assert from 'node:assert/strict'
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+/** Repository root, so the stream test can copy `src/` into a throwaway tree. */
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 import {
   buildRequestBody,
@@ -475,4 +482,101 @@ test('toHostUsage renames vendor fields and drops an unreportable object', () =>
   assert.equal(toHostUsage({ something_else: 1 }), undefined)
   assert.equal(toHostUsage(undefined), undefined)
   assert.equal(toHostUsage(null), undefined)
+})
+
+/**
+ * Every block the adapter closes must carry its accumulated text.
+ *
+ * The host's `BlockAssembler` keeps whatever a `block-end` supplies as the
+ * finished block and never re-derives it from the deltas:
+ *
+ *     case "block-end": { const partial = this.ensure(chunk.index, chunk.block.type);
+ *                         if (partial.block) return; partial.block = chunk.block; }
+ *
+ * so closing a block with a bare `{ type }` stub produces a block whose `text`
+ * is `undefined`. That history is persisted in `replayState` and re-read on the
+ * next turn, which surfaced to the user as
+ *
+ *     Cannot read properties of undefined (reading 'length')
+ *
+ * on the SECOND message of a conversation — the first succeeded because nothing
+ * was replayed yet. The reference adapter closes blocks with the fully
+ * accumulated content (`block: { ...block.content }`), and so must this one.
+ *
+ * The translation is driven through a stubbed transport in a throwaway copy of
+ * `src/`, because `streamMessages` is a static ESM import that cannot be
+ * monkey-patched in place.
+ */
+test('stream closes every block with its accumulated text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'zcode-adapter-'))
+  try {
+    cpSync(join(ROOT, 'src'), join(dir, 'src'), { recursive: true })
+
+    const events = [
+      { type: 'message_start', message: { usage: { input_tokens: 12 } } },
+      { type: 'content_block_start', index: 0, content_block: { type: 'thinking' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'let me think' } },
+      { type: 'content_block_stop', index: 0 },
+      { type: 'content_block_start', index: 1, content_block: { type: 'text' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Hello ' } },
+      { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'world' } },
+      { type: 'content_block_stop', index: 1 },
+      { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 5 } },
+    ]
+
+    writeFileSync(
+      join(dir, 'src', 'transport.js'),
+      `export class UpstreamError extends Error {}
+       export async function* streamMessages() {
+         const events = ${JSON.stringify(events)};
+         for (const e of events) yield { json: e };
+       }
+      `,
+    )
+
+    const { ZcodeAdapter: LocalAdapter } = await import(join(dir, 'src', 'adapter.js'))
+    const adapter = new LocalAdapter({
+      loadCredential: () => ({ jwt: 'test', provider: 'bigmodel', accessToken: 'x' }),
+      loadIdentity: () => ({ blocks: [{ type: 'text', text: 'identity' }] }),
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream({
+      model: 'GLM-5.3-Flash',
+      messages: [{ role: 'user', content: 'hi' }],
+    })) {
+      chunks.push(chunk)
+    }
+
+    const ended = chunks.filter((chunk) => chunk.type === 'block-end')
+    assert.equal(ended.length, 2, 'both blocks must close')
+
+    for (const end of ended) {
+      assert.equal(
+        typeof end.block.text,
+        'string',
+        `block-end for index ${end.index} must carry a text string, got ${JSON.stringify(end.block)}. ` +
+          'A text-less block persists into replayState and breaks the NEXT turn with ' +
+          "\"Cannot read properties of undefined (reading 'length')\".",
+      )
+    }
+    assert.deepEqual(ended[0].block, { type: 'reasoning', text: 'let me think' })
+    assert.deepEqual(ended[1].block, { type: 'text', text: 'Hello world' })
+
+    const finish = chunks.find((chunk) => chunk.type === 'finish')
+    assert.ok(Array.isArray(finish.replayState?.blocks), 'replayState must carry the block list')
+
+    // The host validates replay metadata against the assembled content, so the
+    // two must agree block for block — the mismatch is what made this silent.
+    assert.deepEqual(
+      finish.replayState.blocks,
+      ended.map((end) => end.block),
+      'replayState.blocks must match the blocks the stream closed with',
+    )
+    for (const block of finish.replayState.blocks) {
+      assert.equal(typeof block.text, 'string', 'a replayed block must carry text')
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

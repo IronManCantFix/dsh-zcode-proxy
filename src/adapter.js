@@ -142,6 +142,28 @@ export function toAnthropicMessages(messages) {
 }
 
 /**
+ * Append a delta to one open block's accumulated field.
+ *
+ * Blocks are stored sparsely by upstream index, so a delta can arrive for an
+ * index whose `content_block_start` was never seen (a truncated or malformed
+ * stream). Creating the entry on demand keeps the text from being silently
+ * dropped, which would resurrect the undefined-`text` replay failure.
+ *
+ * @param {Array<Record<string, unknown>>} blocks
+ * @param {number} index
+ * @param {'text' | 'arguments'} field
+ * @param {string} value
+ */
+function appendToBlock(blocks, index, field, value) {
+  let block = blocks[index]
+  if (!block || typeof block !== 'object') {
+    block = { type: 'text', text: '' }
+    blocks[index] = block
+  }
+  block[field] = `${typeof block[field] === 'string' ? block[field] : ''}${value}`
+}
+
+/**
  * Map DSH tool definitions to Anthropic tool definitions.
  *
  * @param {Array<any> | undefined} tools
@@ -415,8 +437,19 @@ export class ZcodeAdapter {
           openBlocks.set(index, blockType)
           yield { type: 'block-start', index, blockType }
 
+          // The host keeps whatever a `block-end` supplies as the finished
+          // block and never re-derives it from the deltas (BlockAssembler:
+          // `if (partial.block) return partial.block`). A `{ type }` stub with
+          // no `text` therefore becomes a block whose `text` is undefined, and
+          // replaying that history throws on the next turn:
+          //
+          //     Cannot read properties of undefined (reading 'length')
+          //
+          // The reference adapter closes blocks with the fully accumulated
+          // content (`block: { ...block.content }`), so the text is gathered
+          // here and emitted on `content_block_stop`.
           if (blockType === 'tool-call') {
-            replayBlocks[index] = { type: 'tool-call', id: block.id, name: block.name }
+            replayBlocks[index] = { type: 'tool-call', id: block.id, name: block.name, arguments: '' }
             yield {
               type: 'tool-call-delta',
               index,
@@ -425,7 +458,7 @@ export class ZcodeAdapter {
               argumentsDelta: '',
             }
           } else {
-            replayBlocks[index] = { type: blockType }
+            replayBlocks[index] = { type: blockType, text: '' }
           }
           break
         }
@@ -434,10 +467,13 @@ export class ZcodeAdapter {
           const index = event.index ?? 0
           const delta = event.delta ?? {}
           if (delta.type === 'text_delta' && typeof delta.text === 'string') {
+            appendToBlock(replayBlocks, index, 'text', delta.text)
             yield { type: 'text-delta', index, text: delta.text }
           } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+            appendToBlock(replayBlocks, index, 'text', delta.thinking)
             yield { type: 'reasoning-delta', index, text: delta.thinking }
           } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+            appendToBlock(replayBlocks, index, 'arguments', delta.partial_json)
             yield {
               type: 'tool-call-delta',
               index,
