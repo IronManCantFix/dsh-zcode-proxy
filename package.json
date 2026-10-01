@@ -1,6 +1,6 @@
 {
   "name": "dsh-zcode-connect",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "description": "Use a GLM coding plan (Z.AI / BigModel) as a model provider inside DeepSeek Harness.",
   "type": "module",
   "engines": {
