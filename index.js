@@ -1,0 +1,412 @@
+/**
+ * DSH host plugin entry for ZCode Connect.
+ *
+ * Registers a model provider backed by a GLM coding plan (Z.AI / BigModel),
+ * reached through ZCode's plan endpoint. Authentication is the plugin's own
+ * browser-authorized login, so no ZCode client install is required at runtime.
+ *
+ * The plugin is deliberately thin: `src/adapter.js` owns the protocol
+ * translation, and everything below only wires that into the host.
+ */
+
+import { PROVIDER_ID, PROVIDER_NAME, ZcodeAdapter } from './src/adapter.js'
+import { fetchQuota, formatUnits, grantedModelIds } from './src/billing.js'
+import { canonicalModelId, metadataFor } from './src/catalog.js'
+import { inspectIdentity, loadIdentityBlocks } from './src/identity.js'
+import { login, PROVIDERS } from './src/oauth.js'
+import { clearCredential, describeCredential, loadCredential, saveCredential } from './src/store.js'
+
+/** Stable cordis plugin name; must match the id in `cordis.patch.yml`. */
+export const name = 'llm-zcode-connect'
+
+/** Services required before the provider can be registered. */
+export const inject = ['llm']
+
+/** Settings namespace backing the plugin's card. */
+export const SETTINGS_NS = 'llm-zcode-connect'
+
+/** Same-origin routes the card calls. */
+export const ROUTES = Object.freeze({
+  status: '/plugins/dsh-zcode-connect/status',
+  quota: '/plugins/dsh-zcode-connect/quota',
+  models: '/plugins/dsh-zcode-connect/models',
+  login: '/plugins/dsh-zcode-connect/login',
+  logout: '/plugins/dsh-zcode-connect/logout',
+})
+
+/**
+ * Wrap our adapter in the host's `LlmAdapter` base class when it is available.
+ *
+ * The host checks the adapter's identity, so extending the real base class
+ * matters. If the import is unavailable (a very old or very new host), the
+ * plain object is registered instead and the host will reject it loudly rather
+ * than silently misbehaving.
+ *
+ * @param {any} dependencies
+ * @returns {Promise<any>}
+ */
+async function createAdapter(dependencies) {
+  let Base = undefined
+  try {
+    const mod = await import('@deepseek-ai/dsh-llm')
+    Base = mod?.LlmAdapter
+  } catch {
+    Base = undefined
+  }
+
+  const prototype = Object.getOwnPropertyDescriptors(ZcodeAdapter.prototype)
+  delete prototype.constructor
+
+  if (typeof Base !== 'function') {
+    return new ZcodeAdapter(dependencies)
+  }
+
+  const Adapter = class extends Base {}
+  Object.defineProperties(Adapter.prototype, prototype)
+  return new Adapter(dependencies)
+}
+
+/**
+ * Read the account's entitled models, falling back to a sensible default when
+ * the account cannot be queried.
+ *
+ * @returns {Promise<Array<{ id: string, name: string, contextWindow: number, maxTokens: number, inputModalities: string[] }>>}
+ */
+async function discoverModels() {
+  const credential = loadCredential()
+  if (credential?.jwt) {
+    try {
+      const quota = await fetchQuota({ jwt: credential.jwt })
+      const ids = grantedModelIds(quota).map(canonicalModelId)
+      if (ids.length > 0) {
+        return ids.map((id) => toHostModel(id))
+      }
+    } catch {
+      // Fall through to the default list; the card surfaces the real error.
+    }
+  }
+  return ['GLM-5.3', 'GLM-5.3-Flash'].map((id) => toHostModel(id))
+}
+
+/**
+ * @param {string} id
+ */
+function toHostModel(id) {
+  const meta = metadataFor(id)
+  return {
+    id: meta.id,
+    name: meta.name,
+    contextWindow: meta.contextWindow,
+    maxTokens: meta.maxOutputTokens,
+    inputModalities: meta.supportsImages ? ['text', 'image'] : ['text'],
+  }
+}
+
+/**
+ * Reject requests that did not originate on the loopback interface.
+ *
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {boolean}
+ */
+export function isTrustedRequest(req) {
+  const origin = req.headers.origin
+  if (typeof origin !== 'string' || !origin) {
+    return true
+  }
+  try {
+    const hostname = new URL(origin).hostname
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * @param {import('node:http').ServerResponse} res
+ * @param {number} status
+ * @param {unknown} body
+ */
+function json(res, status, body) {
+  const payload = JSON.stringify(body)
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(payload),
+    'Cache-Control': 'no-store',
+  })
+  res.end(payload)
+}
+
+/**
+ * @param {import('node:http').IncomingMessage} req
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function readJsonBody(req) {
+  const chunks = []
+  for await (const chunk of req) {
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) {
+    return {}
+  }
+  try {
+    const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Build the status document the card renders.
+ *
+ * @returns {Promise<Record<string, unknown>>}
+ */
+async function buildStatus() {
+  const credential = describeCredential()
+  let identity
+  try {
+    const loaded = loadIdentityBlocks()
+    identity = { source: loaded.source, ...inspectIdentity(loaded) }
+  } catch (error) {
+    identity = { healthy: false, chars: 0, error: error instanceof Error ? error.message : String(error) }
+  }
+
+  /** @type {Record<string, unknown> | undefined} */
+  let quota
+  const stored = credential.present ? loadCredential() : undefined
+  if (stored?.jwt) {
+    try {
+      const summary = await fetchQuota({ jwt: stored.jwt })
+      quota = {
+        buckets: summary.buckets.map((bucket) => ({
+          label: bucket.label,
+          planName: bucket.planName,
+          remaining: bucket.remaining,
+          total: bucket.total,
+          used: bucket.used,
+          remainingText: formatUnits(bucket.remaining),
+          totalText: formatUnits(bucket.total),
+          percent: bucket.total > 0 ? Math.round((bucket.remaining / bucket.total) * 100) : 0,
+          periodEnd: bucket.periodEnd,
+          expiresAt: bucket.expiresAt,
+        })),
+        plans: summary.plans,
+        warnings: summary.warnings,
+        fetchedAt: summary.fetchedAt,
+      }
+    } catch (error) {
+      quota = { error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
+  return {
+    provider: { id: PROVIDER_ID, name: PROVIDER_NAME },
+    credential,
+    identity,
+    quota,
+    providers: PROVIDERS,
+  }
+}
+
+/**
+ * Register the same-origin routes the card uses.
+ *
+ * @param {any} ctx
+ */
+function registerRoutes(ctx) {
+  ctx.inject(['webServer'], (webCtx) => {
+    webCtx.effect(() => {
+      const disposers = []
+
+      disposers.push(
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ROUTES.status,
+          handler: async (req, res) => {
+            if (req.method !== 'GET') {
+              return json(res, 405, { error: 'method not allowed' })
+            }
+            if (!isTrustedRequest(req)) {
+              return json(res, 403, { error: 'origin not trusted' })
+            }
+            try {
+              json(res, 200, await buildStatus())
+            } catch (error) {
+              json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      )
+
+      disposers.push(
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ROUTES.models,
+          handler: async (req, res) => {
+            if (req.method !== 'GET') {
+              return json(res, 405, { error: 'method not allowed' })
+            }
+            if (!isTrustedRequest(req)) {
+              return json(res, 403, { error: 'origin not trusted' })
+            }
+            try {
+              json(res, 200, { models: await discoverModels() })
+            } catch (error) {
+              json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      )
+
+      disposers.push(
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ROUTES.logout,
+          handler: async (req, res) => {
+            if (req.method !== 'POST') {
+              return json(res, 405, { error: 'method not allowed' })
+            }
+            if (!isTrustedRequest(req)) {
+              return json(res, 403, { error: 'origin not trusted' })
+            }
+            try {
+              const removed = clearCredential()
+              json(res, 200, { removed })
+            } catch (error) {
+              json(res, 500, { error: error instanceof Error ? error.message : String(error) })
+            }
+          },
+        }),
+      )
+
+      // Login is a mutation with a long tail: it hands back the authorization
+      // URL immediately and finishes in the background, so the card can show
+      // the link without holding a request open for minutes.
+      /** @type {AbortController | undefined} */
+      let activeLogin
+      disposers.push(() => {
+        activeLogin?.abort()
+      })
+
+      disposers.push(
+        webCtx.webServer.register({
+          kind: 'exact',
+          path: ROUTES.login,
+          handler: async (req, res) => {
+            if (req.method !== 'POST') {
+              return json(res, 405, { error: 'method not allowed' })
+            }
+            if (!isTrustedRequest(req)) {
+              return json(res, 403, { error: 'origin not trusted' })
+            }
+
+            const body = await readJsonBody(req)
+            const provider = typeof body.provider === 'string' ? body.provider : 'bigmodel'
+            if (!PROVIDERS.includes(provider)) {
+              return json(res, 400, { error: `provider must be one of ${PROVIDERS.join(', ')}` })
+            }
+
+            activeLogin?.abort()
+            activeLogin = new AbortController()
+            const controller = activeLogin
+
+            let resolveUrl
+            const urlPromise = new Promise((resolve) => {
+              resolveUrl = resolve
+            })
+
+            login({
+              provider,
+              signal: controller.signal,
+              onAuthorizeUrl: (url) => {
+                resolveUrl(url)
+              },
+            })
+              .then((result) => {
+                saveCredential({
+                  provider: result.provider,
+                  accessToken: result.accessToken,
+                  jwt: result.jwt,
+                  savedAt: new Date().toISOString(),
+                })
+              })
+              .catch(() => {
+                // The card observes the outcome through the status endpoint.
+              })
+
+            const url = await urlPromise
+            json(res, 200, { authorizeUrl: url, provider })
+          },
+        }),
+      )
+
+      return () => {
+        for (const dispose of disposers.reverse()) {
+          try {
+            dispose()
+          } catch {
+            // A failed disposer must not prevent the others from running.
+          }
+        }
+      }
+    })
+  })
+}
+
+/**
+ * Cordis plugin entry.
+ *
+ * @param {any} ctx
+ */
+export function apply(ctx) {
+  const adapter = createAdapter({ discoverModels, providerName: PROVIDER_NAME })
+
+  // `createAdapter` is async, so registration happens once it settles. The
+  // effect keeps the handle disposal tied to the plugin's lifetime.
+  ctx.effect(() => {
+    let releaseAdapter
+    let released = false
+
+    Promise.resolve(adapter).then((instance) => {
+      if (released) {
+        return
+      }
+      releaseAdapter = ctx.llm.registerAdapter([PROVIDER_ID], instance)
+    })
+
+    return () => {
+      released = true
+      releaseAdapter?.()
+    }
+  })
+
+  ctx.effect(() => ctx.llm.registerConfigurableProviders([
+    {
+      provider: PROVIDER_ID,
+      displayName: PROVIDER_NAME,
+      settingsNs: SETTINGS_NS,
+      settingsPath: [],
+      declared: false,
+    },
+  ]))
+
+  ctx.effect(() =>
+    ctx.llm.registerModelDiscovery(SETTINGS_NS, async (request) => {
+      if (request?.provider !== undefined && request.provider !== PROVIDER_ID) {
+        return []
+      }
+      return await discoverModels()
+    }),
+  )
+
+  // The settings service gained `configure` in 0.1.7; older hosts expose
+  // `installSection` instead. Probe rather than assume, so one build works on
+  // both lines.
+  if (typeof ctx.settings?.configure === 'function') {
+    ctx.effect(() => ctx.settings.configure({ auto: true }, ctx.fiber))
+  }
+
+  registerRoutes(ctx)
+}
+
+export { PROVIDER_ID, PROVIDER_NAME }

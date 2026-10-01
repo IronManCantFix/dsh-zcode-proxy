@@ -1,0 +1,53 @@
+{
+  "name": "dsh-zcode-connect",
+  "version": "0.1.0",
+  "description": "Use a GLM coding plan (Z.AI / BigModel) as a model provider inside DeepSeek Harness.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.1.5-rc.1 <0.2.0"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./bin": "./src/bin.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "zcode-connect": "./src/bin.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "doctor": "node src/bin.js doctor",
+    "status": "node src/bin.js status"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-settings": ">=0.1.1-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-host-webserver": ">=0.1.1-rc.1 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-settings": { "optional": true },
+    "@deepseek-ai/dsh-host-webserver": { "optional": true }
+  }
+}

@@ -1,0 +1,9 @@
+# Registers the ZCode Connect provider with the DSH host.
+#
+# Discovery is read-only with respect to ZCode: the plugin authenticates with
+# its own browser-authorized login and stores the result under DSH_HOME. The
+# only thing it may read from a ZCode installation is the identity prompt used
+# by the refresh-identity command.
+- insert:
+    - id: llm-zcode-connect
+      name: dsh-zcode-connect
