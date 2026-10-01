@@ -295,7 +295,7 @@ export class ZcodeAdapter {
    */
   resolveModel(provider, model) {
     const meta = metadataFor(canonicalModelId(model))
-    return Promise.resolve({
+    const result = {
       provider,
       id: meta.id,
       name: meta.name,
@@ -306,22 +306,42 @@ export class ZcodeAdapter {
         efforts: meta.reasoningLevels.map((level) => ({ id: level, name: level })),
         ...(meta.reasoningLevels.includes('high') ? { defaultEffort: 'high' } : {}),
       },
-    })
+    }
+    return Promise.resolve(result)
   }
 
   /**
+   * Bind exact model metadata and the stream entry point for one call.
+   *
+   * The host reads the `model` returned here as a full `LlmResolvedModelInfo`
+   * and validates the request's `reasoningEffort` against it. The base class
+   * does exactly that:
+   *
+   *     async prepareCall(provider, model, signal) {
+   *       return { model: await this.resolveModel(provider, model, signal),
+   *                stream: (options) => this.stream(options) };
+   *     }
+   *
+   * An earlier version of this override hand-built `model` as
+   * `{ provider, id, name }`. That silently dropped `reasoning`, `context` and
+   * `defaultMaxTokens`, so the host saw a model declaring no reasoning support
+   * and rejected every explicit effort with
+   *
+   *     does not support reasoning effort "high"   (UNSUPPORTED_REASONING_EFFORT)
+   *
+   * even though `resolveModel` — the method the model picker queries — reported
+   * the full effort list. The two paths must agree, so this override now
+   * delegates to `resolveModel` instead of restating the shape by hand.
+   *
    * @param {string} provider
    * @param {string} model
    */
-  prepareCall(provider, model) {
-    return Promise.resolve({
-      model: {
-        provider,
-        id: canonicalModelId(model),
-        name: metadataFor(canonicalModelId(model)).name,
-      },
+  async prepareCall(provider, model) {
+    const resolved = await this.resolveModel(provider, model)
+    return {
+      model: resolved,
       stream: (options) => this.stream(options),
-    })
+    }
   }
 
   /**

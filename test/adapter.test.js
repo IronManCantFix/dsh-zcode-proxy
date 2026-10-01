@@ -413,6 +413,50 @@ test('prepareCall binds the canonical model id', async () => {
   assert.equal(typeof prepared.stream, 'function')
 })
 
+/**
+ * The bound model must carry the SAME capability metadata `resolveModel`
+ * reports — reasoning in particular.
+ *
+ * The host reads `prepareCall().model` as a full `LlmResolvedModelInfo` and
+ * validates the request's `reasoningEffort` against it:
+ *
+ *     if (reasoning === void 0 && requested !== void 0) throw LlmError(
+ *       `does not support reasoning effort "${requested}"`,
+ *       'UNSUPPORTED_REASONING_EFFORT')
+ *
+ * An override that hand-built `{ provider, id, name }` therefore dropped
+ * `reasoning` and made every explicit effort fail — while the model picker,
+ * which queries `resolveModel`, kept showing the effort list as available. The
+ * two paths have to agree, so this asserts the agreement rather than the shape
+ * of either one alone.
+ */
+test('prepareCall binds the same reasoning metadata resolveModel reports', async () => {
+  const adapter = new ZcodeAdapter({})
+
+  for (const id of ['GLM-5.3', 'GLM-5.3-Flash']) {
+    const resolved = await adapter.resolveModel('zcode', id)
+    const prepared = await adapter.prepareCall('zcode', id)
+
+    assert.deepEqual(
+      prepared.model.reasoning,
+      resolved.reasoning,
+      `${id}: the bound model must carry resolveModel's reasoning metadata, or the host ` +
+        'rejects every reasoning effort with UNSUPPORTED_REASONING_EFFORT.',
+    )
+    // The host also materializes `defaultMaxTokens` from this object.
+    assert.equal(prepared.model.defaultMaxTokens, resolved.defaultMaxTokens)
+    assert.deepEqual(prepared.model.context, resolved.context)
+
+    // Every effort the picker offers must be acceptable to the call path.
+    for (const effort of resolved.reasoning.efforts) {
+      assert.ok(
+        prepared.model.reasoning.efforts.some((entry) => entry.id === effort.id),
+        `${id}: effort "${effort.id}" is offered by resolveModel but not bound by prepareCall`,
+      )
+    }
+  }
+})
+
 test('toHostUsage renames vendor fields and drops an unreportable object', () => {
   assert.deepEqual(toHostUsage({ input_tokens: 10, output_tokens: 4 }), {
     inputTokens: 10,
