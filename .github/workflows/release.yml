@@ -1,39 +1,50 @@
 # Builds an installable package for dsh-zcode-connect.
 #
-# Two ways to trigger:
-#   - Run the workflow manually (Actions -> Release -> Run workflow).
-#   - Push a tag such as `v0.1.0`.
+# ## Versioning
 #
-# The job runs the test suite first: a tarball that fails its own tests is not
-# worth publishing, and this is the only automated check the project has.
+# The next version is derived from the git tags, which are the single source of
+# truth: the runner is stateless, so nothing else can remember what the last
+# release was. The rule is:
 #
-# The artefact is a pnpm/npm tarball of the repository contents. It carries the
-# `dsh` field from package.json, so a host that installs it picks up the cordis
-# patch and the client entry without any extra wiring.
+#   - No tags yet          -> 0.0.1
+#   - Otherwise            -> the highest existing tag with its patch bumped
+#                             (0.0.1 -> 0.0.2 -> 0.0.3 ...)
+#   - `version` input given-> that exact version, tags bumped or not
+#
+# The bump is patch-only, deliberately: 0.0.9 is followed by 0.0.10, not 0.1.0.
+#
+# ## Trigger
+#
+# Manual only. Run it from Actions -> Release -> Run workflow. The job tags the
+# commit, packs the tarball, and publishes a Release, so every run produces one
+# new version.
 
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to stamp on the package (e.g. 0.1.0). Leave blank to use package.json.'
+        description: 'Exact version to use (e.g. 0.2.0). Leave blank to auto-increment the patch.'
         required: false
         type: string
 
+# `contents: write` is required to push the tag and create the Release. The
+# workflow needs nothing else.
 permissions:
   contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
+        with:
+          # Tags are needed to compute the next version, and a full history is
+          # needed to push a tag back. A shallow clone would hide both.
+          fetch-depth: 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -46,20 +57,59 @@ jobs:
       - name: Run the test suite
         run: node --test test/*.test.js
 
-      - name: Report the package version
-        id: meta
+      # Resolve the version before doing any work, so an invalid `version` input
+      # fails immediately instead of after the tests and the tag have run.
+      - name: Resolve the version to release
+        id: version
+        env:
+          REQUESTED: ${{ inputs.version }}
         run: |
-          version="${{ inputs.version }}"
-          if [ -z "$version" ]; then
-            version="$(node -p "require('./package.json').version")"
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: $version"
+          set -euo pipefail
 
-      - name: Stamp the requested version
-        if: inputs.version != ''
-        run: |
-          npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+          requested="$(echo "${REQUESTED:-}" | tr -d '[:space:]')"
+          requested="${requested#v}"
+
+          if [ -n "$requested" ]; then
+            if ! printf '%s' "$requested" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::version must look like 1.2.3 (got '$requested')"
+              exit 1
+            fi
+            version="$requested"
+            echo "Using the requested version: $version"
+          else
+            latest="$(git tag -l 'v*' \
+              | sed 's/^v//' \
+              | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -t. -k1,1n -k2,2n -k3,3n \
+              | tail -n 1 || true)"
+
+            if [ -z "$latest" ]; then
+              version="0.0.1"
+              echo "No existing release tags; starting at $version"
+            else
+              # Split on dots with IFS rather than using ${x#*.}: the latter is
+              # greedy and would turn 0.0.1 into major=0, rest=1, losing the
+              # minor component.
+              IFS='.' read -r major minor patch <<< "$latest"
+              version="${major}.${minor}.$((patch + 1))"
+              echo "Latest tag is $latest; next patch is $version"
+            fi
+          fi
+
+          tag="v$version"
+
+          # A tag that already exists would make the release step fail halfway;
+          # stop now, while nothing has been published.
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::tag $tag already exists. Pass a different version."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Stamp the version into package.json
+        run: npm version "${{ steps.version.outputs.version }}" --no-git-tag-version --allow-same-version
 
       # `npm pack` is used rather than `pnpm pack` so the build depends on the
       # one toolchain that is already required, and so the tarball layout is the
@@ -67,42 +117,73 @@ jobs:
       - name: Pack the tarball
         id: pack
         run: |
+          set -euo pipefail
           npm pack --pack-destination .
           tarball="$(ls dsh-zcode-connect-*.tgz | head -n 1)"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           echo "Packed: $tarball"
-          tar -tzf "$tarball" | head -n 40
 
+      # The tarball is what users install, so its metadata is checked before it
+      # is published rather than discovered to be wrong afterwards.
       - name: Verify the tarball carries the DSH plugin metadata
         run: |
-          tar -xzf "${{ steps.pack.outputs.tarball }}" package/package.json
-          node -e "
-            const pkg = require('./package/package.json');
-            const missing = [];
-            if (!pkg.dsh?.bundle?.patch) missing.push('dsh.bundle.patch');
-            if (!pkg.dsh?.client?.inject) missing.push('dsh.client.inject');
-            if (!pkg.exports?.['.']) missing.push('exports[\".\"]');
-            if (!pkg.exports?.['./client']) missing.push('exports[\"./client\"]');
-            if (missing.length) {
-              console.error('The packed package.json is missing: ' + missing.join(', '));
+          set -euo pipefail
+          expected="${{ steps.version.outputs.version }}"
+          rm -rf .verify && mkdir .verify
+          tar -xzf "${{ steps.pack.outputs.tarball }}" -C .verify package/package.json
+
+          PKG_DIR="$PWD/.verify" EXPECTED="$expected" node -e "
+            const pkg = require(process.env.PKG_DIR + '/package/package.json');
+            const problems = [];
+            if (!pkg.dsh?.bundle?.patch) problems.push('dsh.bundle.patch is missing');
+            if (!pkg.dsh?.client?.inject) problems.push('dsh.client.inject is missing');
+            if (!pkg.exports?.['.']) problems.push('exports[\".\"] is missing');
+            if (!pkg.exports?.['./client']) problems.push('exports[\"./client\"] is missing');
+            if (pkg.private) problems.push('the private flag would block installation from git');
+            if (pkg.version !== process.env.EXPECTED) {
+              problems.push('version is ' + pkg.version + ', expected ' + process.env.EXPECTED);
+            }
+            if (problems.length) {
+              for (const problem of problems) console.error('::error::' + problem);
               process.exit(1);
             }
             console.log('Plugin metadata OK: ' + pkg.name + '@' + pkg.version);
           "
 
+      - name: Commit the version bump back to the branch
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package.json
+          # Nothing to commit when the version already matched, which happens
+          # when re-running with an explicit version.
+          if git diff --cached --quiet; then
+            echo 'package.json already carries this version; nothing to commit.'
+          else
+            git commit -m "chore(release): ${{ steps.version.outputs.tag }}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Create the tag
+        run: |
+          set -euo pipefail
+          git tag -a "${{ steps.version.outputs.tag }}" -m "dsh-zcode-connect ${{ steps.version.outputs.version }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
       - name: Upload the tarball as a workflow artefact
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-zcode-connect-${{ steps.meta.outputs.version }}
+          name: dsh-zcode-connect-${{ steps.version.outputs.version }}
           path: ${{ steps.pack.outputs.tarball }}
           if-no-files-found: error
 
-      - name: Attach the tarball to a release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${{ github.ref_name }}" \
+          set -euo pipefail
+          gh release create "${{ steps.version.outputs.tag }}" \
             "${{ steps.pack.outputs.tarball }}" \
-            --title "${{ github.ref_name }}" \
+            --title "dsh-zcode-connect ${{ steps.version.outputs.version }}" \
             --generate-notes
