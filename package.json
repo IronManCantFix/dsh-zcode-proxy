@@ -1,6 +1,6 @@
 {
   "name": "dsh-zcode-proxy",
-  "version": "0.0.12",
+  "version": "0.0.13",
   "description": "Use a GLM coding plan (Z.AI / BigModel) as a model provider inside DeepSeek Harness.",
   "type": "module",
   "engines": {
