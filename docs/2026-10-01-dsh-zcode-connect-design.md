@@ -181,7 +181,7 @@ function requiresClientRequestSigning({ access, baseURL }) {
 而 `individual-coding-plan` **属于需要签名的那一类**。凭据也印证：
 
 ```
-account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:6111775177396278:api-key
+account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:<accountId>:api-key
 ```
 
 所以用户当前 ZCode 客户端连的是 **individual-coding-plan（需要签名，且套餐已到期）**，不是 start-plan。

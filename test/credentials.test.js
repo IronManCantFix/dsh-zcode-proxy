@@ -205,7 +205,7 @@ test('decodeJwtPayload reads a payload and tolerates non-JWTs', () => {
 test('collectAccountApiKeys extracts provider and account id from the key name', () => {
   const store = new Map([
     [
-      'account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:6111775177396278:api-key',
+      'account-provider:coding-plan:account:bigmodel-individual-coding-plan:account:1234567890123456:api-key',
       'aaa.bbb',
     ],
     ['oauth:active_provider', 'bigmodel'],
@@ -213,7 +213,7 @@ test('collectAccountApiKeys extracts provider and account id from the key name',
   const keys = collectAccountApiKeys(store)
   assert.equal(keys.length, 1)
   assert.equal(keys[0].provider, 'bigmodel-individual-coding-plan')
-  assert.equal(keys[0].accountId, '6111775177396278')
+  assert.equal(keys[0].accountId, '1234567890123456')
   assert.equal(keys[0].apiKey, 'aaa.bbb')
 })
 

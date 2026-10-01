@@ -1,0 +1,108 @@
+# Builds an installable package for dsh-zcode-connect.
+#
+# Two ways to trigger:
+#   - Run the workflow manually (Actions -> Release -> Run workflow).
+#   - Push a tag such as `v0.1.0`.
+#
+# The job runs the test suite first: a tarball that fails its own tests is not
+# worth publishing, and this is the only automated check the project has.
+#
+# The artefact is a pnpm/npm tarball of the repository contents. It carries the
+# `dsh` field from package.json, so a host that installs it picks up the cordis
+# patch and the client entry without any extra wiring.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp on the package (e.g. 0.1.0). Leave blank to use package.json.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # The package has no runtime dependencies, so the test suite needs nothing
+      # installed; `node --test` runs it directly. Keeping this step dependency
+      # free means a compromised transitive dependency cannot influence a build.
+      - name: Run the test suite
+        run: node --test test/*.test.js
+
+      - name: Report the package version
+        id: meta
+        run: |
+          version="${{ inputs.version }}"
+          if [ -z "$version" ]; then
+            version="$(node -p "require('./package.json').version")"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $version"
+
+      - name: Stamp the requested version
+        if: inputs.version != ''
+        run: |
+          npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+
+      # `npm pack` is used rather than `pnpm pack` so the build depends on the
+      # one toolchain that is already required, and so the tarball layout is the
+      # layout npm itself would produce.
+      - name: Pack the tarball
+        id: pack
+        run: |
+          npm pack --pack-destination .
+          tarball="$(ls dsh-zcode-connect-*.tgz | head -n 1)"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          echo "Packed: $tarball"
+          tar -tzf "$tarball" | head -n 40
+
+      - name: Verify the tarball carries the DSH plugin metadata
+        run: |
+          tar -xzf "${{ steps.pack.outputs.tarball }}" package/package.json
+          node -e "
+            const pkg = require('./package/package.json');
+            const missing = [];
+            if (!pkg.dsh?.bundle?.patch) missing.push('dsh.bundle.patch');
+            if (!pkg.dsh?.client?.inject) missing.push('dsh.client.inject');
+            if (!pkg.exports?.['.']) missing.push('exports[\".\"]');
+            if (!pkg.exports?.['./client']) missing.push('exports[\"./client\"]');
+            if (missing.length) {
+              console.error('The packed package.json is missing: ' + missing.join(', '));
+              process.exit(1);
+            }
+            console.log('Plugin metadata OK: ' + pkg.name + '@' + pkg.version);
+          "
+
+      - name: Upload the tarball as a workflow artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-zcode-connect-${{ steps.meta.outputs.version }}
+          path: ${{ steps.pack.outputs.tarball }}
+          if-no-files-found: error
+
+      - name: Attach the tarball to a release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            "${{ steps.pack.outputs.tarball }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes

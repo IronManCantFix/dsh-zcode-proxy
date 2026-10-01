@@ -17,13 +17,47 @@
 
 ## 安装
 
-```bash
-dsh plugin --profile desktop add github:<你的仓库>/dsh-zcode-connect
+### 方式一：GUI 里从 GitHub 安装（DSH Desktop）
+
+**设置 → 插件 → 安装插件 → 从 GitHub 安装**，填：
+
+```
+IronManCantFix/dsh-zcode-proxy
 ```
 
-然后在 DSH 里：**设置 → 插件 → ZCode → Sign in**。
+装完**重启 DSH Desktop**。
+
+### 方式二：命令行
+
+```bash
+dsh plugin --profile desktop add github:IronManCantFix/dsh-zcode-proxy
+```
+
+### 方式三：手工装进 profile
+
+DSH Desktop 的插件装在 profile 目录里（`~/.dsh/profiles/desktop`）。如果上面两种入口都不可用：
+
+```bash
+cd ~/.dsh/profiles/desktop
+pnpm add github:IronManCantFix/dsh-zcode-proxy
+# 再把 "dsh-zcode-connect" 加进 package.json 的 dsh.profile.bundles
+pnpm install
+```
+
+安装完成后在 DSH 里：**设置 → 插件 → ZCode → Sign in**。
 
 浏览器会打开授权页，同意后插件自动拿到凭据并保存。模型选择器里随即出现 **ZCode** 分组。
+
+> **凭据存储建议**：设一个 `ZCODE_CONNECT_CREDENTIAL_SECRET` 环境变量。不设时用的是机器派生种子，那只是混淆不是保护（见「环境变量」一节）。
+
+### 首次自检
+
+包里自带 CLI，不依赖 `dsh` 命令：
+
+```bash
+zcode-connect status   # 看配置，不发网络请求
+zcode-connect doctor   # 完整体检，含一次真实调用
+```
 
 ## 命令行
 
