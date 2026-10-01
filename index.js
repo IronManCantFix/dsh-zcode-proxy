@@ -255,9 +255,12 @@ async function readJsonBody(req) {
 /**
  * Build the status document the card renders.
  *
+ * @param {Record<string, unknown>} [extra] Route-owned fields to merge in, such
+ *   as the pending login's outcome; `/status` is how the card learns a detached
+ *   login settled.
  * @returns {Promise<Record<string, unknown>>}
  */
-async function buildStatus() {
+async function buildStatus(extra = {}) {
   const credential = describeCredential()
   let identity
   try {
@@ -302,6 +305,7 @@ async function buildStatus() {
     identity,
     quota,
     providers: PROVIDERS,
+    ...extra,
   }
 }
 
@@ -327,7 +331,7 @@ function registerRoutes(ctx) {
               return json(res, 403, { error: 'origin not trusted' })
             }
             try {
-              json(res, 200, await buildStatus())
+              json(res, 200, await buildStatus({ login: loginAttempt }))
             } catch (error) {
               json(res, 500, { error: error instanceof Error ? error.message : String(error) })
             }
@@ -379,8 +383,30 @@ function registerRoutes(ctx) {
       // Login is a mutation with a long tail: it hands back the authorization
       // URL immediately and finishes in the background, so the card can show
       // the link without holding a request open for minutes.
+      //
+      // The handler must NOT await the exchange. It used to, so that the card's
+      // post-login `/status` re-read could not race the credential write — but
+      // that made the request live for as long as the user took to authorize
+      // (up to DEFAULT_LOGIN_TIMEOUT_MS, ten minutes). The card's own refresh
+      // aborts whatever request it owns, so pressing 刷新 mid-authorization
+      // killed the login request while the exchange kept running server-side,
+      // leaving `loading`/`busy` stuck and every button disabled: the pane
+      // froze on 加载中… with the credential already on disk.
+      //
+      // Returning promptly and publishing the outcome separately keeps the
+      // write ordering observable without binding it to a request lifetime.
       /** @type {AbortController | undefined} */
       let activeLogin
+      /**
+       * Outcome of the most recent login attempt, read by `/status`.
+       *
+       * `pending` while the browser authorization is still open, then the
+       * settled result. The card polls `/status` and stops once this leaves
+       * `pending`, which is the signal that replaced awaiting the request.
+       *
+       * @type {{ state: 'idle' | 'pending' | 'signed-in' | 'failed', provider?: string, error?: string, at?: string }}
+       */
+      let loginAttempt = { state: 'idle' }
       disposers.push(() => {
         activeLogin?.abort()
       })
@@ -412,13 +438,13 @@ function registerRoutes(ctx) {
               resolveUrl = resolve
             })
 
-            // The card must not re-read the status until the credential is on
-            // disk. Returning as soon as the authorize URL is known is why the
-            // settings pane used to keep showing "not signed in" until a manual
-            // refresh: the status re-read raced the detached write below and
-            // always lost. Tracking the settlement lets the handler hold the
-            // response until the store is actually updated.
-            const settled = login({
+            loginAttempt = { state: 'pending', provider }
+
+            // Detached on purpose: the response below only waits for the
+            // authorize URL. The settlement is published into `loginAttempt`
+            // instead of into this request, so `/status` can report it whether
+            // or not the originating request is still open.
+            void login({
               provider,
               signal: controller.signal,
               onAuthorizeUrl: (url) => {
@@ -432,18 +458,40 @@ function registerRoutes(ctx) {
                   jwt: result.jwt,
                   savedAt: new Date().toISOString(),
                 })
-                return { signedIn: true }
+                // Only publish if this attempt is still the current one; a
+                // superseded login must not overwrite a newer attempt's state.
+                if (activeLogin === controller) {
+                  loginAttempt = {
+                    state: 'signed-in',
+                    provider: result.provider,
+                    at: new Date().toISOString(),
+                  }
+                }
               })
-              .catch((error) => ({
-                signedIn: false,
-                error: error instanceof Error ? error.message : String(error),
-              }))
+              .catch((error) => {
+                if (activeLogin !== controller) {
+                  return
+                }
+                // A superseded attempt is aborted, not failed: the user pressed
+                // sign-in again, or the plugin unloaded. Reporting that as a
+                // failure would surface a spurious error card for an action the
+                // user never saw fail, so the attempt just goes idle and the
+                // newer attempt's own state takes over.
+                const aborted = controller.signal.aborted || error?.kind === 'aborted'
+                loginAttempt = aborted
+                  ? { state: 'idle' }
+                  : {
+                      state: 'failed',
+                      provider,
+                      error: error instanceof Error ? error.message : String(error),
+                      at: new Date().toISOString(),
+                    }
+              })
 
+            // The response waits only for the authorize URL, never for the
+            // exchange; the card follows the settlement through `/status`.
             const url = await urlPromise
-            // `settled` never rejects (the catch is above), so this cannot
-            // throw; an abandoned login resolves through the abort path.
-            const outcome = await settled
-            json(res, 200, { authorizeUrl: url, provider, ...outcome })
+            json(res, 200, { authorizeUrl: url, provider, pending: true })
           },
         }),
       )

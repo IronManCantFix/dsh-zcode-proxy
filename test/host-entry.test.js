@@ -382,41 +382,87 @@ test('discovered models carry provider, id and name in the host-validated shape'
 })
 
 /**
- * `/login` must not answer before the credential is readable.
+ * `/login` must answer promptly, and the credential write must stay observable.
  *
- * The card's sign-in handler awaits the login route and then immediately
- * re-reads `/status`. The route used to return as soon as the authorize URL was
- * known and finish the exchange in a detached promise, so that re-read raced
- * the credential write and always lost: the pane kept showing "not signed in"
- * until the user pressed Refresh by hand. The handler now awaits the exchange,
- * which is the ordering this test pins.
+ * Two earlier fixes pull in opposite directions, and this test pins the
+ * compromise between them:
+ *
+ * 1. Returning as soon as the authorize URL was known, with the exchange in a
+ *    detached promise, made the card's post-login `/status` re-read race the
+ *    credential write and always lose — the pane kept showing 未登录 until the
+ *    user pressed Refresh by hand.
+ * 2. Making the handler `await` the exchange fixed that ordering but tied the
+ *    request's lifetime to the authorization (up to ten minutes). The card
+ *    aborts the request it owns when Refresh is pressed, so refreshing during
+ *    authorization killed the login request and left `loading`/`busy` stuck:
+ *    the pane froze on 加载中… with every button disabled, which is worse than
+ *    the bug it replaced.
+ *
+ * The resolution is to answer promptly AND publish the settlement into
+ * `/status`, so the card can follow it without holding a request open.
  */
-test('the login route resolves only after the credential is written', async () => {
+test('the login route answers without waiting for the exchange', async () => {
   const source = readFileSync(join(ROOT, 'index.js'), 'utf8')
   const handlerStart = source.indexOf('path: ROUTES.login')
   const handler = source.slice(handlerStart)
   // Everything up to the close of the login handler: the assertions below need
-  // both the tracked chain and the response that follows it.
+  // both the detached chain and the response that follows it.
   const body = handler.slice(0, handler.indexOf('\n        }),'))
 
-  // The login promise must be retained, so its settlement can be awaited...
-  assert.match(
+  // The exchange must not be awaited, or the request lives as long as the
+  // authorization window and a Refresh mid-login strands the card.
+  assert.doesNotMatch(
     body,
-    /const settled = login\(/,
-    'the login promise must be captured so the handler can await its settlement.',
+    /await\s+settled/,
+    'the handler must not await the exchange: that ties the request lifetime to the ' +
+      'authorization and lets a Refresh abort it, stranding loading/busy.',
   )
-  // ...the credential write must happen inside that tracked chain...
+
+  // The credential write must still happen inside the tracked chain...
   assert.match(
     body,
-    /\.then\(\(result\) => \{[\s\S]*?saveCredential\(/,
-    'the credential must be saved inside the tracked login chain, not a detached callback.',
+    /login\(\{[\s\S]*?\.then\(\(result\) => \{[\s\S]*?saveCredential\(/,
+    'the credential must be saved inside the login chain, not a detached callback.',
   )
-  // ...and the response must be sent only after awaiting it.
+
+  // ...and its outcome must be published for `/status`, since the response can
+  // no longer carry it.
   assert.match(
     body,
-    /await settled[\s\S]*?json\(res, 200/,
-    'the handler must await the settled login BEFORE responding, or the card\'s post-login ' +
-      'status re-read races the credential write and shows a stale "not signed in".',
+    /loginAttempt = \{ state: 'pending'/,
+    'the handler must mark the attempt pending so the card knows to follow it.',
+  )
+  assert.match(
+    body,
+    /\.then\(\(result\) => \{[\s\S]*?state: 'signed-in'/,
+    "a completed exchange must publish state 'signed-in' into the status document.",
+  )
+
+  // The response must go out after the authorize URL alone.
+  assert.match(
+    body,
+    /await urlPromise[\s\S]*?json\(res, 200/,
+    'the handler must respond once the authorize URL is known, not after the exchange.',
+  )
+})
+
+/**
+ * `/status` must carry the login outcome the card polls for.
+ *
+ * The route answers before the exchange settles, so `/status` is the only place
+ * the card can learn whether the browser authorization succeeded. Without this
+ * field the poll would never terminate and the card would sit on 加载中…
+ * forever — the same freeze, reached by a different path.
+ */
+test('the status route reports the detached login outcome', async () => {
+  const source = readFileSync(join(ROOT, 'index.js'), 'utf8')
+  const handlerStart = source.indexOf('path: ROUTES.status')
+  const body = source.slice(handlerStart, source.indexOf('path: ROUTES.models'))
+
+  assert.match(
+    body,
+    /buildStatus\(\{\s*login:/,
+    'the status route must pass the login attempt through, or the card can never see it settle.',
   )
 })
 

@@ -278,25 +278,48 @@ export function ZcodeCard(props = {}) {
   const [loginUrl, setLoginUrl] = useState(undefined)
 
   /**
-   * One request in flight at a time; the previous one is aborted so a fast
-   * double click cannot land a stale answer after a newer one.
+   * One status request in flight at a time; the previous one is aborted so a
+   * fast double click cannot land a stale answer after a newer one.
    */
   const inFlight = useRef(undefined)
 
+  /**
+   * Bumped to invalidate every in-flight status request and the login poller.
+   *
+   * Unmounting happens while a poll may be sleeping, and a poll that outlives
+   * its card would call `setState` on a dead component; the generation token is
+   * what lets the async loops notice and stop.
+   */
+  const generation = useRef(0)
+
   const refresh = useCallback(async () => {
+    // Only status requests share `inFlight`. The login POST deliberately does
+    // NOT: it used to be abortable from here, so pressing 刷新 while the
+    // browser authorization was open killed the login request and left the card
+    // stuck on 加载中… with every button disabled. Login now returns as soon as
+    // the authorize URL is known (the exchange continues server-side), so there
+    // is nothing long-lived to abort.
     inFlight.current?.abort()
     const controller = new AbortController()
     inFlight.current = controller
+    const mine = generation.current
     setLoading(true)
-    setError(undefined)
     try {
-      setStatus(await call(ROUTES.status, { signal: controller.signal }))
+      const next = await call(ROUTES.status, { signal: controller.signal })
+      if (generation.current === mine) {
+        setStatus(next)
+        setError(undefined)
+      }
+      return next
     } catch (caught) {
-      if (caught?.name !== 'AbortError') {
+      if (caught?.name !== 'AbortError' && generation.current === mine) {
         setError(caught instanceof Error ? caught.message : String(caught))
       }
+      return undefined
     } finally {
-      // A newer request owns the spinner now; leave its state alone.
+      // A newer request owns the spinner now; leave its state alone. This only
+      // skips when `inFlight` has genuinely been replaced — otherwise the
+      // spinner would never clear.
       if (inFlight.current === controller) {
         setLoading(false)
       }
@@ -304,9 +327,57 @@ export function ZcodeCard(props = {}) {
   }, [])
 
   useEffect(() => {
+    generation.current += 1
     refresh()
-    return () => inFlight.current?.abort()
+    return () => {
+      // Kill the poller and any request this render owned.
+      generation.current += 1
+      inFlight.current?.abort()
+    }
   }, [refresh])
+
+  /**
+   * Follow a detached login to its end by polling `/status`.
+   *
+   * The server hands back the authorize URL immediately and settles the
+   * exchange on its own, publishing the outcome into `/status.login`. Polling
+   * is what replaced the old `await` on the login request: the request no
+   * longer lives for the whole authorization, so nothing can abort it out from
+   * under a refreshing user.
+   *
+   * @param {number} mine Generation to stay alive for.
+   */
+  const followLogin = useCallback(
+    async (mine) => {
+      // Matches the server's own authorization window with headroom; the poll
+      // gives up rather than spinning forever if the tab is closed.
+      const deadline = Date.now() + 11 * 60 * 1000
+      while (generation.current === mine && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+        if (generation.current !== mine) {
+          return
+        }
+        const next = await refresh()
+        if (next === undefined) {
+          return
+        }
+        const attempt = next.login
+        if (attempt?.state === 'signed-in') {
+          setLoginUrl(undefined)
+          return
+        }
+        if (attempt?.state === 'failed') {
+          setError(`${text('signInFailed')}: ${attempt.error ?? ''}`.trim())
+          return
+        }
+        if (attempt?.state === 'idle') {
+          // Superseded or unloaded; the card's own state is authoritative now.
+          return
+        }
+      }
+    },
+    [refresh, text],
+  )
 
   /** Run one mutation, then re-read the status the card renders from. */
   const run = useCallback(
@@ -315,28 +386,35 @@ export function ZcodeCard(props = {}) {
       setError(undefined)
       try {
         await task()
-        await refresh()
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught))
       } finally {
+        // Always released: an aborted or throwing task must never leave the
+        // buttons disabled, which is what "clicking 刷新 does nothing" was.
         setBusy(false)
       }
     },
-    [refresh],
+    [],
   )
 
   const signIn = (provider) =>
     run(async () => {
+      const mine = generation.current
       const result = await call(ROUTES.login, { method: 'POST', body: { provider } })
       setLoginUrl(result.authorizeUrl)
-      window.open(result.authorizeUrl, '_blank', 'noopener')
-      // The route now resolves only after the credential is stored, so the
-      // `refresh()` that `run` performs next already sees the signed-in state;
-      // a failed authorization is reported here rather than left to the card
-      // to infer from an unchanged status.
-      if (result.signedIn === false) {
-        throw new Error(`${text('signInFailed')}: ${result.error ?? ''}`.trim())
+      // Opening the tab is a convenience, never a requirement: the card renders
+      // the same URL as a clickable link below, and a popup blocker can both
+      // throw and silently return null. Letting that failure reject the task
+      // would drop the card into its error view and report a sign-in failure
+      // for an authorization the user can still complete by clicking the link.
+      try {
+        window.open(result.authorizeUrl, '_blank', 'noopener')
+      } catch {
+        // The link below is the fallback.
       }
+      // The route resolves as soon as the URL is known; follow the exchange in
+      // the background so the button is usable again immediately.
+      void followLogin(mine)
     })
 
   const signOut = () => run(() => call(ROUTES.logout, { method: 'POST' }))
