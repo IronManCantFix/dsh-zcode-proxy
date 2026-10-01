@@ -11,15 +11,29 @@ window.__ModuleLoader__.load({
      * Settings card for ZCode Connect.
      *
      * Loaded by the host through `dsh.client`; `package.json` points `exports["./client"]`
-     * here. The host wraps this module in `window.__ModuleLoader__.load({...})`, and
-     * reads `exports.apply` / `exports.inject` from the factory result — the same
-     * contract the bundled market-installer card uses.
+     * at the generated `client.js`, which registers itself with
+     * `window.__ModuleLoader__.load({...})` and exposes `exports.apply` /
+     * `exports.inject` — the same contract the bundled market-installer card uses.
+     * See `client/build.mjs` for why the wrapper exists.
      *
-     * The card is intentionally dependency-light: it renders with plain elements so
-     * it cannot break when host UI internals move. Data comes from the plugin's own
-     * same-origin routes, and mutations go through those routes as well, which keeps
-     * the browser half free of credential handling.
+     * The card is a REACT component, not a DOM builder. `ctx.slots.register()` hands
+     * its second argument to the host's React renderer, so anything that is not a
+     * React element renders as nothing: this file used to build the card with
+     * `document.createElement` and return the detached node, which produced a
+     * completely blank settings pane with no error anywhere in the log. Every
+     * comparable plugin (dshmarket, dsh-pocket-nas, dsh-mimo-connect) returns React
+     * elements, and `react` arrives through the factory's `require` — it is never a
+     * global and is not a dependency of this package.
+     *
+     * Styling stays inline on purpose: the host exposes no styling API to client
+     * plugins, and inline styles keep the card independent of host CSS internals.
+     * Data comes from the plugin's own same-origin routes, and mutations go through
+     * those routes as well, which keeps the browser half free of credential
+     * handling.
      */
+
+    /** Injected by the host's client module system; the build wraps this file. */
+    const { createElement: h, useCallback, useEffect, useRef, useState } = require('react')
 
     const ROUTES = {
       status: '/plugins/dsh-zcode-connect/status',
@@ -56,36 +70,6 @@ window.__ModuleLoader__.load({
         throw new Error(parsed?.error ?? `request failed: HTTP ${response.status}`)
       }
       return parsed
-    }
-
-    /**
-     * @param {string} tag
-     * @param {Record<string, unknown>} [props]
-     * @param {...unknown} children
-     */
-    function element(tag, props = {}, ...children) {
-      const node = document.createElement(tag)
-      for (const [key, value] of Object.entries(props)) {
-        if (value === undefined || value === null) {
-          continue
-        }
-        if (key === 'style' && typeof value === 'object') {
-          Object.assign(node.style, value)
-        } else if (key === 'class') {
-          node.className = String(value)
-        } else if (key.startsWith('on') && typeof value === 'function') {
-          node.addEventListener(key.slice(2).toLowerCase(), value)
-        } else {
-          node.setAttribute(key, String(value))
-        }
-      }
-      for (const child of children.flat()) {
-        if (child === undefined || child === null || child === false) {
-          continue
-        }
-        node.append(child instanceof Node ? child : document.createTextNode(String(child)))
-      }
-      return node
     }
 
     const STYLES = {
@@ -134,15 +118,22 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * One label/value line. Returns `null` for an absent value so callers can list
+     * conditionals inline, the way the DOM version skipped undefined children.
+     *
      * @param {string} label
      * @param {unknown} value
+     * @returns {unknown}
      */
     function row(label, value) {
-      return element(
+      if (value === undefined || value === null || value === false) {
+        return null
+      }
+      return h(
         'div',
         { style: STYLES.row },
-        element('span', { style: STYLES.label }, label),
-        element('span', { style: STYLES.value }, value),
+        h('span', { style: STYLES.label }, label),
+        h('span', { style: STYLES.value }, String(value)),
       )
     }
 
@@ -151,10 +142,10 @@ window.__ModuleLoader__.load({
      */
     function bar(percent) {
       const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0))
-      return element(
+      return h(
         'div',
         { style: STYLES.bar },
-        element('div', { style: { ...STYLES.barFill, width: `${clamped}%` } }),
+        h('div', { style: { ...STYLES.barFill, width: `${clamped}%` } }),
       )
     }
 
@@ -169,209 +160,208 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * A titled block. Children are listed inline as an array (some entries are
+     * conditionally `null`), so React needs a key on every one of them; rather than
+     * make each caller invent one, anything still missing a key gets its position,
+     * which is stable for a card whose rows never reorder within a render.
+     *
+     * @param {{ children?: unknown, style?: object }} props
+     */
+    function Section({ children, style }) {
+      const list = children === undefined || children === null ? [] : Array.isArray(children) ? children : [children]
+      const keyed = list.map((child, index) =>
+        child !== null && typeof child === 'object' && child.key === undefined && child.type !== undefined
+          ? { ...child, key: `row-${index}` }
+          : child,
+      )
+      return h('div', { style: { ...STYLES.section, ...style } }, keyed)
+    }
+
+    /**
      * The card component.
      *
-     * @param {{ t?: (key: string) => string, runtime?: unknown }} props
+     * @param {{ t?: (key: string) => string }} props
      */
-    function ZcodeCard(props) {
-      const state = {
-        loading: true,
-        error: undefined,
-        status: undefined,
-        loginUrl: undefined,
-        busy: false,
+    function ZcodeCard() {
+      const [status, setStatus] = useState(undefined)
+      const [error, setError] = useState(undefined)
+      const [loading, setLoading] = useState(true)
+      const [busy, setBusy] = useState(false)
+      const [loginUrl, setLoginUrl] = useState(undefined)
+
+      /**
+       * One request in flight at a time; the previous one is aborted so a fast
+       * double click cannot land a stale answer after a newer one.
+       */
+      const inFlight = useRef(undefined)
+
+      const refresh = useCallback(async () => {
+        inFlight.current?.abort()
+        const controller = new AbortController()
+        inFlight.current = controller
+        setLoading(true)
+        setError(undefined)
+        try {
+          setStatus(await call(ROUTES.status, { signal: controller.signal }))
+        } catch (caught) {
+          if (caught?.name !== 'AbortError') {
+            setError(caught instanceof Error ? caught.message : String(caught))
+          }
+        } finally {
+          // A newer request owns the spinner now; leave its state alone.
+          if (inFlight.current === controller) {
+            setLoading(false)
+          }
+        }
+      }, [])
+
+      useEffect(() => {
+        refresh()
+        return () => inFlight.current?.abort()
+      }, [refresh])
+
+      /** Run one mutation, then re-read the status the card renders from. */
+      const run = useCallback(
+        async (task) => {
+          setBusy(true)
+          setError(undefined)
+          try {
+            await task()
+            await refresh()
+          } catch (caught) {
+            setError(caught instanceof Error ? caught.message : String(caught))
+          } finally {
+            setBusy(false)
+          }
+        },
+        [refresh],
+      )
+
+      const signIn = (provider) =>
+        run(async () => {
+          const result = await call(ROUTES.login, { method: 'POST', body: { provider } })
+          setLoginUrl(result.authorizeUrl)
+          window.open(result.authorizeUrl, '_blank', 'noopener')
+        })
+
+      const signOut = () => run(() => call(ROUTES.logout, { method: 'POST' }))
+
+      if (loading) {
+        return h('div', { style: STYLES.card }, h('p', { style: STYLES.note }, 'Loading…'))
       }
 
-      const root = element('div', { style: STYLES.card })
-
-      const render = () => {
-        root.replaceChildren()
-
-        if (state.loading) {
-          root.append(element('p', { style: STYLES.note }, 'Loading…'))
-          return
-        }
-
-        if (state.error) {
-          root.append(element('p', { style: STYLES.error }, state.error))
-          root.append(
-            element(
-              'div',
-              { style: STYLES.buttons },
-              element('button', { style: STYLES.button, onClick: refresh }, 'Retry'),
-            ),
-          )
-          return
-        }
-
-        const status = state.status ?? {}
-        const credential = status.credential ?? {}
-        const identity = status.identity ?? {}
-        const quota = status.quota
-
-        // Account
-        root.append(
-          element(
+      if (error) {
+        return h(
+          'div',
+          { style: STYLES.card },
+          h('p', { style: STYLES.error }, error),
+          h(
             'div',
-            { style: STYLES.section },
-            element('h4', { style: STYLES.heading }, 'Account'),
-            row('status', credential.present ? `signed in (${credential.provider})` : 'not signed in'),
-            credential.present && credential.hasJwt ? row('plan token', 'present') : undefined,
-            credential.savedAt ? row('signed in at', new Date(credential.savedAt).toLocaleString()) : undefined,
-            credential.path ? row('stored at', credential.path) : undefined,
+            { style: STYLES.buttons },
+            h('button', { type: 'button', style: STYLES.button, onClick: refresh }, 'Retry'),
           ),
         )
+      }
+
+      const view = status ?? {}
+      const credential = view.credential ?? {}
+      const identity = view.identity ?? {}
+      const quota = view.quota
+
+      return h(
+        'div',
+        { style: STYLES.card },
+
+        // Account
+        Section({
+          children: [
+            h('h4', { key: 'heading', style: STYLES.heading }, 'Account'),
+            row('status', credential.present ? `signed in (${credential.provider})` : 'not signed in'),
+            row('plan token', credential.present && credential.hasJwt ? 'present' : undefined),
+            row('signed in at', credential.savedAt ? new Date(credential.savedAt).toLocaleString() : undefined),
+            row('stored at', credential.path),
+          ],
+        }),
 
         // Identity prompt provenance — surfaced because a stale snapshot is the
         // single most likely cause of a provider that suddenly stops working.
-        root.append(
-          element(
-            'div',
-            { style: STYLES.section },
-            element('h4', { style: STYLES.heading }, 'Identity prompt'),
+        Section({
+          children: [
+            h('h4', { key: 'heading', style: STYLES.heading }, 'Identity prompt'),
             row('size', `${identity.chars ?? 0} characters`),
             row('healthy', identity.healthy ? 'yes' : 'no'),
             identity.healthy
-              ? undefined
-              : element('p', { style: STYLES.warning }, identity.warning ?? identity.error ?? 'unknown'),
-          ),
-        )
-
-        // Quota
-        if (quota) {
-          const section = element('div', { style: STYLES.section }, element('h4', { style: STYLES.heading }, 'Quota'))
-          if (quota.error) {
-            section.append(element('p', { style: STYLES.error }, quota.error))
-          } else if (!quota.buckets || quota.buckets.length === 0) {
-            section.append(element('p', { style: STYLES.note }, 'No quota buckets reported by upstream.'))
-          } else {
-            for (const bucket of quota.buckets) {
-              section.append(
-                element(
-                  'div',
-                  { style: STYLES.section },
-                  row(bucket.label, `${bucket.remainingText} / ${bucket.totalText} (${bucket.percent}%)`),
-                  bar(bucket.percent),
-                  element('p', { style: STYLES.note }, `${bucket.planName}${bucket.periodEnd ? ` · resets ${formatTime(bucket.periodEnd)}` : ''}`),
+              ? null
+              : h(
+                  'p',
+                  { key: 'warning', style: STYLES.warning },
+                  identity.warning ?? identity.error ?? 'unknown',
                 ),
-              )
-            }
-          }
-          root.append(section)
-        }
+          ],
+        }),
+
+        // Quota — absent when the upstream account endpoint is unreachable.
+        quota
+          ? Section({
+              children: [
+                h('h4', { key: 'heading', style: STYLES.heading }, 'Quota'),
+                quota.error
+                  ? h('p', { key: 'error', style: STYLES.error }, quota.error)
+                  : !quota.buckets || quota.buckets.length === 0
+                    ? h('p', { key: 'empty', style: STYLES.note }, 'No quota buckets reported by upstream.')
+                    : quota.buckets.map((bucket, index) =>
+                        Section({
+                          key: `bucket-${index}`,
+                          children: [
+                            row(bucket.label, `${bucket.remainingText} / ${bucket.totalText} (${bucket.percent}%)`),
+                            bar(bucket.percent),
+                            h(
+                              'p',
+                              { key: 'plan', style: STYLES.note },
+                              `${bucket.planName}${bucket.periodEnd ? ` · resets ${formatTime(bucket.periodEnd)}` : ''}`,
+                            ),
+                          ],
+                        }),
+                      ),
+              ],
+            })
+          : null,
 
         // Sign in / out
-        const buttons = element('div', { style: STYLES.buttons })
-        if (credential.present) {
-          buttons.append(
-            element(
-              'button',
-              {
-                style: STYLES.button,
-                disabled: state.busy,
-                onClick: async () => {
-                  state.busy = true
-                  render()
-                  try {
-                    await call(ROUTES.logout, { method: 'POST' })
-                    await refresh()
-                  } catch (error) {
-                    state.error = error instanceof Error ? error.message : String(error)
-                  } finally {
-                    state.busy = false
-                    render()
-                  }
-                },
-              },
-              'Sign out',
-            ),
-          )
-        } else {
-          for (const provider of status.providers ?? ['bigmodel', 'zai']) {
-            buttons.append(
-              element(
-                'button',
-                {
-                  style: STYLES.button,
-                  disabled: state.busy,
-                  onClick: async () => {
-                    state.busy = true
-                    state.error = undefined
-                    render()
-                    try {
-                      const result = await call(ROUTES.login, { method: 'POST', body: { provider } })
-                      state.loginUrl = result.authorizeUrl
-                      window.open(result.authorizeUrl, '_blank', 'noopener')
-                    } catch (error) {
-                      state.error = error instanceof Error ? error.message : String(error)
-                    } finally {
-                      state.busy = false
-                      render()
-                    }
-                  },
-                },
-                `Sign in (${provider})`,
+        h(
+          'div',
+          { key: 'buttons', style: STYLES.buttons },
+          credential.present
+            ? h('button', { type: 'button', style: STYLES.button, disabled: busy, onClick: signOut }, 'Sign out')
+            : (view.providers ?? ['bigmodel', 'zai']).map((provider) =>
+                h(
+                  'button',
+                  { key: provider, type: 'button', style: STYLES.button, disabled: busy, onClick: () => signIn(provider) },
+                  `Sign in (${provider})`,
+                ),
               ),
-            )
-          }
-        }
-        buttons.append(
-          element('button', { style: STYLES.button, disabled: state.busy, onClick: refresh }, 'Refresh'),
-        )
-        root.append(buttons)
+          h('button', { key: 'refresh', type: 'button', style: STYLES.button, disabled: busy, onClick: refresh }, 'Refresh'),
+        ),
 
-        if (state.loginUrl) {
-          root.append(
-            element(
-              'div',
-              { style: STYLES.section },
-              element('p', { style: STYLES.note }, 'Finish the authorization in the tab that just opened:'),
-              element(
-                'a',
-                { style: STYLES.link, href: state.loginUrl, target: '_blank', rel: 'noopener' },
-                state.loginUrl,
-              ),
-            ),
-          )
-        }
+        loginUrl
+          ? Section({
+              key: 'login',
+              children: [
+                h('p', { key: 'note', style: STYLES.note }, 'Finish the authorization in the tab that just opened:'),
+                h('a', { key: 'link', style: STYLES.link, href: loginUrl, target: '_blank', rel: 'noopener' }, loginUrl),
+              ],
+            })
+          : null,
 
-        if (credential.present && !credential.hasJwt) {
-          root.append(
-            element(
+        credential.present && !credential.hasJwt
+          ? h(
               'p',
-              { style: STYLES.warning },
+              { key: 'no-jwt', style: STYLES.warning },
               'This login has no plan token, so plan-backed models are unavailable. Sign in again with a ' +
                 'coding-plan subscription.',
-            ),
-          )
-        }
-      }
-
-      let currentRequest
-
-      async function refresh() {
-        currentRequest?.abort()
-        currentRequest = new AbortController()
-        state.loading = true
-        state.error = undefined
-        render()
-        try {
-          state.status = await call(ROUTES.status, { signal: currentRequest.signal })
-        } catch (error) {
-          if (error?.name === 'AbortError') {
-            return
-          }
-          state.error = error instanceof Error ? error.message : String(error)
-        } finally {
-          state.loading = false
-          render()
-        }
-      }
-
-      // Kick off the first load once the node is in the tree.
-      queueMicrotask(refresh)
-
-      return root
+            )
+          : null,
+      )
     }
 
     /**

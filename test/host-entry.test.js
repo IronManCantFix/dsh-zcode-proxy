@@ -40,11 +40,18 @@ const entry = await import(join(ROOT, 'index.js'))
  * activate`. Running the bundle the way the page does is the whole point: a
  * bare ESM artifact throws here, at the same token the browser reports.
  *
- * @returns {{ name?: string, inject?: unknown, apply?: unknown }}
+ * `react` is the one require the host answers (through the factory), so this
+ * stub records what was asked for instead of failing the load. A card that is
+ * not a React component cannot be rendered by the host's slot registry, so the
+ * stub deliberately returns something that is NOT a usable react: any component
+ * that tries to call a hook is then loud rather than silently blank.
+ *
+ * @returns {{ name?: string, inject?: unknown, apply?: unknown, requires: string[] }}
  */
 function loadClientBundle() {
   const source = readFileSync(join(ROOT, 'client.js'), 'utf8')
   const registered = []
+  const requires = []
   const previous = globalThis.window
   globalThis.window = { ...previous, __ModuleLoader__: { load: (spec) => registered.push(spec) } }
   try {
@@ -60,9 +67,15 @@ function loadClientBundle() {
   const spec = registered[0]
   assert.equal(typeof spec.factory, 'function', 'the registered module must carry a factory')
   const exportsObject = spec.factory((id) => {
-    throw new Error(`the client bundle must not require anything, but asked for "${id}"`)
+    requires.push(id)
+    if (id === 'react') {
+      // Enough of the react surface for module scope to evaluate; hooks are
+      // intentionally absent so a render attempt fails here loudly.
+      return { createElement: () => ({ type: 'stub', props: {} }) }
+    }
+    throw new Error(`the client bundle asked for an unexpected module: "${id}"`)
   })
-  return exportsObject
+  return { ...exportsObject, requires }
 }
 
 /** The client half, loaded the way the host loads it into the page. */
@@ -171,6 +184,67 @@ test('cordis.patch.yml points at this package and matches the plugin id', () => 
  * The `files`-less package must still ship the three paths the host resolves:
  * the entry, the client bundle, and the patch.
  */
+/**
+ * The card has to be a React component.
+ *
+ * `ctx.slots.register()` hands its second argument to the host's React renderer.
+ * This file once built the card with `document.createElement` and returned the
+ * detached node: it loaded cleanly, registered cleanly, produced no error in any
+ * log, and rendered a completely blank settings pane — the failure had no
+ * symptom to grep for. Returning a React element is the contract, so it is
+ * asserted directly, along with the fact that `react` reaches the card through
+ * the factory rather than a global (a page has no global React; see the note in
+ * dsh-pocket-nas' build about react never being a global).
+ */
+test('the client card is a React component, not a DOM builder', () => {
+  assert.ok(
+    client.requires.includes('react'),
+    "the card must obtain react through the factory: require('react')",
+  )
+  assert.equal(typeof client.ZcodeCard, 'function', 'the slot registry needs a component function')
+
+  const calls = []
+  const React = {
+    createElement: (type, props, ...children) => {
+      calls.push({ type, props, children })
+      return { $$typeof: Symbol.for('react.element'), type, props, children }
+    },
+    useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect: () => {},
+    useRef: () => ({ current: undefined }),
+    useCallback: (fn) => fn,
+  }
+
+  // Re-run the factory with a react whose API the component actually uses, so
+  // calling the component exercises its real render path.
+  const source = readFileSync(join(ROOT, 'client.js'), 'utf8')
+  const registered = []
+  const previousWindow = globalThis.window
+  // A DOM global must NOT be required: the card is rendered by React, and a
+  // component that reaches for `document` during render would break under the
+  // host's renderer. Its absence here is part of the assertion.
+  globalThis.window = { ...previousWindow, __ModuleLoader__: { load: (spec) => registered.push(spec) } }
+  const previousDocument = globalThis.document
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(source)()
+    delete globalThis.document
+    const exportsObject = registered[0].factory((id) => (id === 'react' ? React : undefined))
+    const rendered = exportsObject.ZcodeCard({})
+
+    assert.ok(rendered !== null && typeof rendered === 'object', 'the card must return a React element')
+    assert.equal(rendered.$$typeof, Symbol.for('react.element'), 'the card must return a React element')
+    assert.ok(calls.length > 0, 'the card must build its tree with react.createElement')
+    // The DOM-builder version returned a detached node whose methods gave it
+    // away; a React element never carries them.
+    assert.equal(typeof rendered.replaceChildren, 'undefined', 'the card must not return a DOM node')
+    assert.equal(typeof rendered.append, 'undefined', 'the card must not return a DOM node')
+  } finally {
+    globalThis.window = previousWindow
+    globalThis.document = previousDocument
+  }
+})
+
 test('package.json exports every path the host loads', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 
