@@ -19,8 +19,16 @@ import { clearCredential, describeCredential, loadCredential, saveCredential } f
 /** Stable cordis plugin name; must match the id in `cordis.patch.yml`. */
 export const name = 'llm-zcode-connect'
 
-/** Services required before the provider can be registered. */
-export const inject = ['llm']
+/**
+ * Services required before the provider can be registered.
+ *
+ * `settings` must be listed even though the plugin only *probes* it: cordis
+ * raises `cannot get property "settings" without inject` on any read of an
+ * undeclared service, so an undeclared probe is itself the failure. Declaring
+ * it also guarantees the service is ready before `apply` runs, which removes
+ * the need to probe at all.
+ */
+export const inject = ['llm', 'settings']
 
 /** Settings namespace backing the plugin's card. */
 export const SETTINGS_NS = 'llm-zcode-connect'
@@ -400,9 +408,9 @@ export function apply(ctx) {
   )
 
   // The settings service gained `configure` in 0.1.7; older hosts expose
-  // `installSection` instead. Probe rather than assume, so one build works on
-  // both lines.
-  if (typeof ctx.settings?.configure === 'function') {
+  // `installSection` instead. `settings` is declared in `inject`, so the
+  // service is guaranteed to be here; only the method may differ.
+  if (typeof ctx.settings.configure === 'function') {
     ctx.effect(() => ctx.settings.configure({ auto: true }, ctx.fiber))
   }
 
