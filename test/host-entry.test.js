@@ -419,3 +419,25 @@ test('the login route resolves only after the credential is written', async () =
       'status re-read races the credential write and shows a stale "not signed in".',
   )
 })
+
+/**
+ * The plugin must report the version it is actually running.
+ *
+ * The settings card shows this, and its whole value is that it answers "is a
+ * stale copy installed?" — the single most common cause of a fix appearing not
+ * to work. A hardcoded or build-stamped value would answer a different
+ * question, so the version is read from the running module's own
+ * `package.json` and asserted to agree with the file on disk.
+ */
+test('the host entry exposes the installed package version', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+
+  assert.equal(typeof entry.VERSION, 'string', 'index.js must export VERSION')
+  assert.match(entry.VERSION, /^\d+\.\d+\.\d+/, 'VERSION must look like a semver string')
+  assert.equal(
+    entry.VERSION,
+    pkg.version,
+    'VERSION must be read from package.json, not hardcoded — otherwise the card reports a ' +
+      'version that need not match the installed files.',
+  )
+})

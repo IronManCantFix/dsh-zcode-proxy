@@ -9,12 +9,45 @@
  * translation, and everything below only wires that into the host.
  */
 
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { PROVIDER_ID, PROVIDER_NAME, ZcodeAdapter } from './src/adapter.js'
 import { fetchQuota, formatUnits, grantedModelIds } from './src/billing.js'
 import { canonicalModelId, metadataFor } from './src/catalog.js'
 import { inspectIdentity, loadIdentityBlocks } from './src/identity.js'
 import { login, PROVIDERS } from './src/oauth.js'
 import { clearCredential, describeCredential, loadCredential, saveCredential } from './src/store.js'
+
+/**
+ * The installed package version, read from this package's own `package.json`.
+ *
+ * The path is derived from `import.meta.url` rather than the process CWD,
+ * because the host may launch from anywhere and the plugin is loaded from
+ * inside a profile's `node_modules`. Reading it at startup — rather than
+ * hardcoding it — is what makes the settings card report the version that is
+ * actually installed, which is the only useful answer when a stale copy is the
+ * suspected cause of a bug.
+ *
+ * Failing to read it is not fatal: the card simply omits the row.
+ *
+ * @returns {string | undefined}
+ */
+function readOwnVersion() {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    const parsed = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'))
+    return typeof parsed?.version === 'string' && parsed.version.trim()
+      ? parsed.version.trim()
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Resolved once at load; the installed version cannot change while running. */
+export const VERSION = readOwnVersion()
 
 /**
  * Stable cordis plugin name; must match the `id` of this package's row in
@@ -264,6 +297,7 @@ async function buildStatus() {
 
   return {
     provider: { id: PROVIDER_ID, name: PROVIDER_NAME },
+    version: VERSION,
     credential,
     identity,
     quota,

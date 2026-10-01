@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
       refresh: { zh: '刷新', en: 'Refresh' },
       signOut: { zh: '退出登录', en: 'Sign out' },
       account: { zh: '账户', en: 'Account' },
+      version: { zh: '版本', en: 'version' },
       status: { zh: '状态', en: 'status' },
       signedInAs: { zh: '已登录', en: 'signed in' },
       notSignedIn: { zh: '未登录', en: 'not signed in' },
@@ -379,6 +380,10 @@ window.__ModuleLoader__.load({
         Section({
           children: [
             h('h4', { key: 'heading', style: STYLES.heading }, text('account')),
+            // The installed version, straight from the running host half. Reported
+            // rather than hardcoded so a stale copy — the single most common cause
+            // of "I already fixed that" — is visible at a glance.
+            row(text('version'), view.version ? `v${view.version}` : undefined),
             row(
               text('status'),
               credential.present ? `${text('signedInAs')} (${credential.provider})` : text('notSignedIn'),
