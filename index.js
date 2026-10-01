@@ -16,8 +16,19 @@ import { inspectIdentity, loadIdentityBlocks } from './src/identity.js'
 import { login, PROVIDERS } from './src/oauth.js'
 import { clearCredential, describeCredential, loadCredential, saveCredential } from './src/store.js'
 
-/** Stable cordis plugin name; must match the id in `cordis.patch.yml`. */
-export const name = 'llm-zcode-connect'
+/**
+ * Stable cordis plugin name; must match the `id` of this package's row in
+ * `cordis.patch.yml`.
+ *
+ * It is deliberately the PACKAGE NAME. The market's boot pass matches an
+ * installed package against the user's patch layer by exact package name or by
+ * the row id derived from that name (`market/lib/hot.js: patchLayerManages`);
+ * a row id that differs from the package name matches neither, so the market
+ * hot-mounts the package as a second entry and the two collide. Keeping them
+ * equal is what lets install, upgrade and reinstall work with no manual edit to
+ * the profile — the shape dsh-pocket-nas ships.
+ */
+export const name = 'dsh-zcode-connect'
 
 /**
  * Services required before the provider can be registered.

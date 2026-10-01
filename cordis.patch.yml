@@ -4,6 +4,17 @@
 # its own browser-authorized login and stores the result under DSH_HOME. The
 # only thing it may read from a ZCode installation is the identity prompt used
 # by the refresh-identity command.
+#
+# The row id is the PACKAGE NAME, not the plugin's cordis `name`. The market's
+# boot pass hot-mounts any installed package its user patch layer does not
+# mention, which puts a second entry beside this one and makes the two collide
+# as "client-modules: ... resolves from multiple active Loader sources". It
+# matches a package by exact name or by the row id derived from that name
+# (`market/lib/hot.js: patchLayerManages`), and `llm-zcode-connect` is neither —
+# so the bundle row itself and the manual marker row had to be kept in sync by
+# hand on every reinstall. Naming the row after the package makes the plugin
+# self-describing: install, upgrade and reinstall all work with no profile
+# edit. dsh-pocket-nas ships the same shape.
 - insert:
-    - id: llm-zcode-connect
+    - id: dsh-zcode-connect
       name: dsh-zcode-connect

@@ -35,7 +35,12 @@ import { fileURLToPath } from 'node:url'
 const sourceDir = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(sourceDir, '..')
 const sourcePath = resolve(sourceDir, 'index.js')
-const outputPath = resolve(packageRoot, 'client.js')
+// `DSH_ZCODE_CLIENT_OUT` lets the test suite build to a scratch path and compare
+// that against the committed artifact, instead of a "check" that rewrites the
+// very file it is supposed to be verifying.
+const outputPath = process.env.DSH_ZCODE_CLIENT_OUT
+  ? resolve(process.env.DSH_ZCODE_CLIENT_OUT)
+  : resolve(packageRoot, 'client.js')
 const loaderId = process.env.DSH_ZCODE_CLIENT_ID ?? 'dsh-zcode-connect'
 
 const source = await readFile(sourcePath, 'utf8')
