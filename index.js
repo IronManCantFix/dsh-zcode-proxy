@@ -43,12 +43,49 @@ export const ROUTES = Object.freeze({
 })
 
 /**
- * Wrap our adapter in the host's `LlmAdapter` base class when it is available.
+ * Build the host-visible adapter instance.
  *
- * The host checks the adapter's identity, so extending the real base class
- * matters. If the import is unavailable (a very old or very new host), the
- * plain object is registered instead and the host will reject it loudly rather
+ * `Impl` is our own implementation class and `Base` is the host's `LlmAdapter`
+ * when it can be imported. The host checks the adapter's identity, so the
+ * registered object has to be an instance of the real base class.
+ *
+ * Copying `Impl.prototype` onto a subclass is not enough: `LlmAdapter` declares
+ * no constructor of its own, so a bare `class Adapter extends Base {}` never
+ * runs `Impl`'s constructor. `this.dependencies` then stayed `undefined` and
+ * the host's first call threw `Cannot read properties of undefined (reading
+ * 'providerName')` out of `providerInfo`, which the harness turns into
+ * `dsh: fatal load failure` and a refused boot. The subclass therefore has to
+ * re-establish that instance state itself.
+ *
+ * If the import is unavailable (a very old or very new host), the plain
+ * implementation is registered instead and the host rejects it loudly rather
  * than silently misbehaving.
+ *
+ * @param {any} Impl
+ * @param {any} Base
+ * @param {any} dependencies
+ * @returns {any}
+ */
+export function wrapAdapter(Impl, Base, dependencies) {
+  if (typeof Base !== 'function') {
+    return new Impl(dependencies)
+  }
+
+  const prototype = Object.getOwnPropertyDescriptors(Impl.prototype)
+  delete prototype.constructor
+
+  const Adapter = class extends Base {
+    constructor(deps = {}) {
+      super()
+      this.dependencies = deps
+    }
+  }
+  Object.defineProperties(Adapter.prototype, prototype)
+  return new Adapter(dependencies)
+}
+
+/**
+ * Wrap our adapter in the host's `LlmAdapter` base class when it is available.
  *
  * @param {any} dependencies
  * @returns {Promise<any>}
@@ -62,16 +99,7 @@ async function createAdapter(dependencies) {
     Base = undefined
   }
 
-  const prototype = Object.getOwnPropertyDescriptors(ZcodeAdapter.prototype)
-  delete prototype.constructor
-
-  if (typeof Base !== 'function') {
-    return new ZcodeAdapter(dependencies)
-  }
-
-  const Adapter = class extends Base {}
-  Object.defineProperties(Adapter.prototype, prototype)
-  return new Adapter(dependencies)
+  return wrapAdapter(ZcodeAdapter, Base, dependencies)
 }
 
 /**

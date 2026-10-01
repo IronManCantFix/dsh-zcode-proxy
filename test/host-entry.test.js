@@ -21,6 +21,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { ZcodeAdapter } from '../src/adapter.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -118,4 +119,36 @@ test('package.json exports every path the host loads', () => {
   assert.equal(pkg.dsh.bundle.patch, './cordis.patch.yml')
   assert.equal(pkg.dsh.client.platform, 'web')
   assert.ok(pkg.dsh.client.inject.includes('@deepseek-ai/dsh-client-ui-settings-plugins'))
+})
+
+/**
+ * The wrapper is the only place our adapter meets the host's base class, and it
+ * shipped a startup crash: the host's `LlmAdapter` declares no constructor, so
+ * `class Adapter extends Base {}` never ran `ZcodeAdapter`'s constructor and
+ * `this.dependencies` stayed `undefined`. The host's first call then threw
+ *
+ *     TypeError: Cannot read properties of undefined (reading 'providerName')
+ *
+ * out of `providerInfo`, which the harness reports as `dsh: fatal load failure`
+ * and which stops DSH from booting (exit code 1). The base class is faked here
+ * because the real one only resolves inside a DSH install — which is precisely
+ * why nothing covered this path before.
+ */
+test('the host-class wrapper keeps the adapter instance state', () => {
+  const Base = class {}
+  const adapter = entry.wrapAdapter(ZcodeAdapter, Base, { providerName: 'ZCode Connect' })
+
+  assert.ok(adapter instanceof Base, 'the host checks that the adapter is its own LlmAdapter')
+  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Connect' })
+})
+
+/**
+ * The fallback path is the one every test in this repository used to take, so
+ * it must keep working when the host class cannot be imported.
+ */
+test('the wrapper falls back to the plain implementation without a base class', () => {
+  const adapter = entry.wrapAdapter(ZcodeAdapter, undefined, { providerName: 'ZCode Connect' })
+
+  assert.equal(adapter instanceof ZcodeAdapter, true)
+  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Connect' })
 })
