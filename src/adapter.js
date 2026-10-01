@@ -377,7 +377,7 @@ export class ZcodeAdapter {
     if (!credential) {
       throw new UpstreamError('not signed in to ZCode', {
         kind: 'auth',
-        hint: 'Run `zcode-connect login` and try again.',
+        hint: 'Run `zcode-proxy login` and try again.',
       })
     }
 

@@ -38,7 +38,7 @@ const entry = await import(join(ROOT, 'index.js'))
  * `window.__ModuleLoader__.load`. Importing it (as this test used to) hid that
  * contract completely — the file imported fine under Node while every real boot
  * failed with `Uncaught SyntaxError: Unexpected token 'export'`, which the host
- * reports as `dsh-zcode-connect: import failed` / `web boot: 1 entry did not
+ * reports as `dsh-zcode-proxy: import failed` / `web boot: 1 entry did not
  * activate`. Running the bundle the way the page does is the whole point: a
  * bare ESM artifact throws here, at the same token the browser reports.
  *
@@ -129,7 +129,7 @@ test('every service index.js reads is declared in inject', () => {
 })
 
 test('the host entry exposes the cordis plugin contract', () => {
-  assert.equal(entry.name, 'dsh-zcode-connect')
+  assert.equal(entry.name, 'dsh-zcode-proxy')
   assert.equal(typeof entry.apply, 'function')
   assert.equal(entry.PROVIDER_ID, 'zcode')
 })
@@ -141,7 +141,7 @@ test('the host entry exposes the cordis plugin contract', () => {
  * This is not cosmetic. The market matches an installed package against the
  * user's patch layer by exact package name or by the row id derived from it
  * (`market/lib/hot.js: patchLayerManages`). While this plugin called itself
- * `llm-zcode-connect`, neither matched, so the market hot-mounted a second
+ * `llm-zcode-proxy`, neither matched, so the market hot-mounted a second
  * entry beside the bundle row on every boot — the collision surfaced as
  * `client-modules: ... resolves from multiple active Loader sources` and then
  * as `Unexpected token 'export'` in the page — and every reinstall needed a
@@ -163,7 +163,7 @@ test('the plugin name equals the package name and the patch row id', () => {
 })
 
 test('the client half declares the slots service its section registers into', () => {
-  assert.equal(client.name, 'dsh-zcode-connect-client')
+  assert.equal(client.name, 'dsh-zcode-proxy-client')
   assert.ok(Array.isArray(client.inject))
   assert.ok(client.inject.includes('slots'), 'the client registers a settings section')
 
@@ -325,10 +325,10 @@ test('package.json exports every path the host loads', () => {
  */
 test('the host-class wrapper keeps the adapter instance state', () => {
   const Base = class {}
-  const adapter = entry.wrapAdapter(ZcodeAdapter, Base, { providerName: 'ZCode Connect' })
+  const adapter = entry.wrapAdapter(ZcodeAdapter, Base, { providerName: 'ZCode Proxy' })
 
   assert.ok(adapter instanceof Base, 'the host checks that the adapter is its own LlmAdapter')
-  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Connect' })
+  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Proxy' })
 })
 
 /**
@@ -336,10 +336,10 @@ test('the host-class wrapper keeps the adapter instance state', () => {
  * it must keep working when the host class cannot be imported.
  */
 test('the wrapper falls back to the plain implementation without a base class', () => {
-  const adapter = entry.wrapAdapter(ZcodeAdapter, undefined, { providerName: 'ZCode Connect' })
+  const adapter = entry.wrapAdapter(ZcodeAdapter, undefined, { providerName: 'ZCode Proxy' })
 
   assert.equal(adapter instanceof ZcodeAdapter, true)
-  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Connect' })
+  assert.deepEqual(adapter.providerInfo('zcode'), { id: 'zcode', name: 'ZCode Proxy' })
 })
 
 /**

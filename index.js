@@ -1,5 +1,5 @@
 /**
- * DSH host plugin entry for ZCode Connect.
+ * DSH host plugin entry for ZCode Proxy.
  *
  * Registers a model provider backed by a GLM coding plan (Z.AI / BigModel),
  * reached through ZCode's plan endpoint. Authentication is the plugin's own
@@ -61,7 +61,7 @@ export const VERSION = readOwnVersion()
  * equal is what lets install, upgrade and reinstall work with no manual edit to
  * the profile — the shape dsh-pocket-nas ships.
  */
-export const name = 'dsh-zcode-connect'
+export const name = 'dsh-zcode-proxy'
 
 /**
  * Services required before the provider can be registered.
@@ -75,15 +75,15 @@ export const name = 'dsh-zcode-connect'
 export const inject = ['llm', 'settings']
 
 /** Settings namespace backing the plugin's card. */
-export const SETTINGS_NS = 'llm-zcode-connect'
+export const SETTINGS_NS = 'llm-zcode-proxy'
 
 /** Same-origin routes the card calls. */
 export const ROUTES = Object.freeze({
-  status: '/plugins/dsh-zcode-connect/status',
-  quota: '/plugins/dsh-zcode-connect/quota',
-  models: '/plugins/dsh-zcode-connect/models',
-  login: '/plugins/dsh-zcode-connect/login',
-  logout: '/plugins/dsh-zcode-connect/logout',
+  status: '/plugins/dsh-zcode-proxy/status',
+  quota: '/plugins/dsh-zcode-proxy/quota',
+  models: '/plugins/dsh-zcode-proxy/models',
+  login: '/plugins/dsh-zcode-proxy/login',
+  logout: '/plugins/dsh-zcode-proxy/logout',
 })
 
 /**

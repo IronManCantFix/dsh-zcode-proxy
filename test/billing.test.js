@@ -175,7 +175,7 @@ test('formatUnits renders compact magnitudes', () => {
 })
 
 test('resolveDeviceMid prefers an already-stored identifier', () => {
-  const env = { DSH_HOME: mkdtempSync(join(tmpdir(), 'zcode-connect-device-')) }
+  const env = { DSH_HOME: mkdtempSync(join(tmpdir(), 'zcode-proxy-device-')) }
   const first = resolveDeviceMid({ env })
   assert.match(first, /^[0-9a-f-]{36}$/i)
   // A second call must not rotate the identifier.
@@ -183,7 +183,7 @@ test('resolveDeviceMid prefers an already-stored identifier', () => {
 })
 
 test('resolveDeviceMid reuses the ZCode device id when one is present', () => {
-  const home = mkdtempSync(join(tmpdir(), 'zcode-connect-zcode-'))
+  const home = mkdtempSync(join(tmpdir(), 'zcode-proxy-zcode-'))
   const zcodeHome = join(home, '.zcode')
   mkdirSync(join(zcodeHome, 'v2'), { recursive: true })
   writeFileSync(
@@ -193,7 +193,7 @@ test('resolveDeviceMid reuses the ZCode device id when one is present', () => {
   )
 
   const env = {
-    DSH_HOME: mkdtempSync(join(tmpdir(), 'zcode-connect-dsh-')),
+    DSH_HOME: mkdtempSync(join(tmpdir(), 'zcode-proxy-dsh-')),
     ZCODE_HOME: zcodeHome,
   }
   assert.equal(resolveDeviceMid({ env }), 'a7312f04-47a3-46b2-bae6-14efa5baef49')

@@ -1,5 +1,5 @@
 /**
- * dsh-zcode-connect browser half: client/index.js -> client.js
+ * dsh-zcode-proxy browser half: client/index.js -> client.js
  *
  * Why a build step exists at all
  * ------------------------------
@@ -15,7 +15,7 @@
  *
  *     Uncaught SyntaxError: Unexpected token 'export'
  *
- * which the host reports as `dsh-zcode-connect: import failed` and
+ * which the host reports as `dsh-zcode-proxy: import failed` and
  * `web boot: 1 entry did not activate` — the plugin's host half loads fine and
  * only the settings card is missing, so the failure looks unrelated to the
  * card. dsh-pocket-nas and dsh-mimo-connect both ship the wrapped form.
@@ -41,7 +41,7 @@ const sourcePath = resolve(sourceDir, 'index.js')
 const outputPath = process.env.DSH_ZCODE_CLIENT_OUT
   ? resolve(process.env.DSH_ZCODE_CLIENT_OUT)
   : resolve(packageRoot, 'client.js')
-const loaderId = process.env.DSH_ZCODE_CLIENT_ID ?? 'dsh-zcode-connect'
+const loaderId = process.env.DSH_ZCODE_CLIENT_ID ?? 'dsh-zcode-proxy'
 
 const source = await readFile(sourcePath, 'utf8')
 

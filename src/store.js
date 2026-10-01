@@ -9,7 +9,7 @@
  *
  * Unlike ZCode's store, the seed is explicit:
  *
- *   - `ZCODE_CONNECT_CREDENTIAL_SECRET` when set (portable across machines), or
+ *   - `ZCODE_PROXY_CREDENTIAL_SECRET` when set (portable across machines), or
  *   - a machine-derived fallback string.
  *
  * The fallback is a convenience, not a security boundary: anything that can
@@ -35,7 +35,7 @@ import { dirname, join } from 'node:path'
 export const ENCRYPTED_PREFIX = 'enc:v1:'
 
 /** Environment variable that supplies the storage seed. */
-export const STORE_SECRET_ENV = 'ZCODE_CONNECT_CREDENTIAL_SECRET'
+export const STORE_SECRET_ENV = 'ZCODE_PROXY_CREDENTIAL_SECRET'
 
 /** Environment variable that overrides the DSH home directory. */
 export const DSH_HOME_ENV = 'DSH_HOME'
@@ -62,7 +62,7 @@ export function dshHome(env = process.env) {
  * @returns {string}
  */
 export function storeDirectory(env = process.env) {
-  return join(dshHome(env), 'zcode-connect')
+  return join(dshHome(env), 'zcode-proxy')
 }
 
 /**
@@ -90,7 +90,7 @@ export function resolveStoreSecret(env = process.env) {
   } catch {
     // Match ZCode's fallback behaviour when the uid has no passwd entry.
   }
-  return `zcode-connect-fallback:${platform().toLowerCase()}:${homedir()}:${username}`
+  return `zcode-proxy-fallback:${platform().toLowerCase()}:${homedir()}:${username}`
 }
 
 /**

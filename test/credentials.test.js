@@ -51,7 +51,7 @@ function encryptLikeZcode(plaintext, secret) {
  * @returns {string} path to a temporary credential store
  */
 function writeStore(entries) {
-  const directory = mkdtempSync(join(tmpdir(), 'zcode-connect-test-'))
+  const directory = mkdtempSync(join(tmpdir(), 'zcode-proxy-test-'))
   const filePath = join(directory, 'credentials.json')
   writeFileSync(filePath, JSON.stringify(entries), 'utf8')
   return filePath

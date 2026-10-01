@@ -13,7 +13,7 @@
     "extractedAt": "2026-10-01T02:28:25.697Z",
     "appVersion": "3.14.4",
     "sha256OfSource": "fad4c35c4c36ec210d8a06d3fa0e77de23c8545e2eb6ff90aea1eb38d1e6275f",
-    "extractor": "dsh-zcode-connect/src/identity.js"
+    "extractor": "dsh-zcode-proxy/src/identity.js"
   },
   "blocks": [
     {

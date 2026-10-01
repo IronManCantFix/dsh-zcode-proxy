@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Command line entry for dsh-zcode-connect.
+ * Command line entry for dsh-zcode-proxy.
  *
  * Verbs:
  *   login [--provider zai|bigmodel]   browser authorization
@@ -38,16 +38,16 @@ import {
 } from './store.js'
 import { sendMessages } from './transport.js'
 
-const USAGE = `dsh-zcode-connect — use a GLM coding plan inside DSH
+const USAGE = `dsh-zcode-proxy — use a GLM coding plan inside DSH
 
 Usage:
-  zcode-connect login [--provider zai|bigmodel]   authorize in a browser
-  zcode-connect logout                            forget the stored credential
-  zcode-connect status                            show configuration
-  zcode-connect doctor                            full diagnostics
-  zcode-connect quota                             plan quota snapshot
-  zcode-connect models                            entitled models
-  zcode-connect refresh-identity                  re-extract the identity prompt
+  zcode-proxy login [--provider zai|bigmodel]   authorize in a browser
+  zcode-proxy logout                            forget the stored credential
+  zcode-proxy status                            show configuration
+  zcode-proxy doctor                            full diagnostics
+  zcode-proxy quota                             plan quota snapshot
+  zcode-proxy models                            entitled models
+  zcode-proxy refresh-identity                  re-extract the identity prompt
 
 Options:
   --json        machine-readable output
@@ -180,7 +180,7 @@ async function commandStatus(options) {
   const payload = {
     credential,
     identity: { path: DEFAULT_IDENTITY_DATA_PATH, ...identity },
-    secretSource: process.env.ZCODE_CONNECT_CREDENTIAL_SECRET ? 'environment' : 'machine-derived',
+    secretSource: process.env.ZCODE_PROXY_CREDENTIAL_SECRET ? 'environment' : 'machine-derived',
   }
 
   if (options.json) {
@@ -212,12 +212,12 @@ async function commandStatus(options) {
   if (payload.secretSource === 'machine-derived') {
     process.stdout.write(
       '\n  Note: the machine-derived seed is obfuscation, not protection.\n' +
-        '  Set ZCODE_CONNECT_CREDENTIAL_SECRET to make the file actually private.\n',
+        '  Set ZCODE_PROXY_CREDENTIAL_SECRET to make the file actually private.\n',
     )
   }
 
   if (!credential.present) {
-    process.stdout.write('\nRun `zcode-connect login` to sign in.\n')
+    process.stdout.write('\nRun `zcode-proxy login` to sign in.\n')
   }
   return 0
 }
@@ -346,7 +346,7 @@ function safeZcodeAccount() {
 async function commandQuota(options) {
   const stored = loadCredential()
   if (!stored?.jwt) {
-    process.stderr.write('No plan token stored. Run `zcode-connect login` first.\n')
+    process.stderr.write('No plan token stored. Run `zcode-proxy login` first.\n')
     return 1
   }
 
@@ -383,7 +383,7 @@ async function commandQuota(options) {
 async function commandModels(options) {
   const stored = loadCredential()
   if (!stored?.jwt) {
-    process.stderr.write('No plan token stored. Run `zcode-connect login` first.\n')
+    process.stderr.write('No plan token stored. Run `zcode-proxy login` first.\n')
     return 1
   }
 

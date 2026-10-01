@@ -1,5 +1,5 @@
 /**
- * Settings card for ZCode Connect.
+ * Settings card for ZCode Proxy.
  *
  * Loaded by the host through `dsh.client`; `package.json` points `exports["./client"]`
  * at the generated `client.js`, which registers itself with
@@ -27,12 +27,12 @@
 const { createElement: h, useCallback, useEffect, useRef, useState } = require('react')
 
 const ROUTES = {
-  status: '/plugins/dsh-zcode-connect/status',
-  login: '/plugins/dsh-zcode-connect/login',
-  logout: '/plugins/dsh-zcode-connect/logout',
+  status: '/plugins/dsh-zcode-proxy/status',
+  login: '/plugins/dsh-zcode-proxy/login',
+  logout: '/plugins/dsh-zcode-proxy/logout',
 }
 
-export const name = 'dsh-zcode-connect-client'
+export const name = 'dsh-zcode-proxy-client'
 export const inject = ['slots', 'locale']
 
 /**
@@ -482,7 +482,7 @@ export function apply(ctx) {
     ctx.slots.register(
       {
         name: 'settings.section',
-        id: 'zcode-connect',
+        id: 'zcode-proxy',
         order: 441,
         label: () => 'ZCode',
         // The slot's `inject` supplies the props the component receives. The

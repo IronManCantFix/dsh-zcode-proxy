@@ -1,4 +1,4 @@
-# Builds an installable package for dsh-zcode-connect.
+# Builds an installable package for dsh-zcode-proxy.
 #
 # ## Versioning
 #
@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           npm pack --pack-destination .
-          tarball="$(ls dsh-zcode-connect-*.tgz | head -n 1)"
+          tarball="$(ls dsh-zcode-proxy-*.tgz | head -n 1)"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           echo "Packed: $tarball"
 
@@ -168,13 +168,13 @@ jobs:
       - name: Create the tag
         run: |
           set -euo pipefail
-          git tag -a "${{ steps.version.outputs.tag }}" -m "dsh-zcode-connect ${{ steps.version.outputs.version }}"
+          git tag -a "${{ steps.version.outputs.tag }}" -m "dsh-zcode-proxy ${{ steps.version.outputs.version }}"
           git push origin "${{ steps.version.outputs.tag }}"
 
       - name: Upload the tarball as a workflow artefact
         uses: actions/upload-artifact@v4
         with:
-          name: dsh-zcode-connect-${{ steps.version.outputs.version }}
+          name: dsh-zcode-proxy-${{ steps.version.outputs.version }}
           path: ${{ steps.pack.outputs.tarball }}
           if-no-files-found: error
 
@@ -185,5 +185,5 @@ jobs:
           set -euo pipefail
           gh release create "${{ steps.version.outputs.tag }}" \
             "${{ steps.pack.outputs.tarball }}" \
-            --title "dsh-zcode-connect ${{ steps.version.outputs.version }}" \
+            --title "dsh-zcode-proxy ${{ steps.version.outputs.version }}" \
             --generate-notes

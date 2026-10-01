@@ -26,7 +26,7 @@ import {
  * @returns {string} a credential file path inside a fresh temp directory
  */
 function tempStorePath() {
-  return join(mkdtempSync(join(tmpdir(), 'zcode-connect-store-')), 'credentials.json')
+  return join(mkdtempSync(join(tmpdir(), 'zcode-proxy-store-')), 'credentials.json')
 }
 
 const SAMPLE = {
@@ -38,19 +38,19 @@ const SAMPLE = {
 
 test('resolveStoreSecret prefers the environment variable', () => {
   assert.equal(
-    resolveStoreSecret({ ZCODE_CONNECT_CREDENTIAL_SECRET: ' chosen ' }),
+    resolveStoreSecret({ ZCODE_PROXY_CREDENTIAL_SECRET: ' chosen ' }),
     'chosen',
   )
 })
 
 test('resolveStoreSecret falls back to a machine-derived string', () => {
-  assert.match(resolveStoreSecret({}), /^zcode-connect-fallback:[a-z]+:/)
+  assert.match(resolveStoreSecret({}), /^zcode-proxy-fallback:[a-z]+:/)
 })
 
 test('store paths honour DSH_HOME', () => {
   const env = { DSH_HOME: '/tmp/dsh-home-for-test' }
-  assert.equal(storeDirectory(env), '/tmp/dsh-home-for-test/zcode-connect')
-  assert.equal(storePath(env), '/tmp/dsh-home-for-test/zcode-connect/credentials.json')
+  assert.equal(storeDirectory(env), '/tmp/dsh-home-for-test/zcode-proxy')
+  assert.equal(storePath(env), '/tmp/dsh-home-for-test/zcode-proxy/credentials.json')
 })
 
 test('encryptValue round-trips and produces a v1 envelope', () => {
@@ -75,7 +75,7 @@ test('decryptValue rejects malformed envelopes', () => {
 
 test('saveCredential then loadCredential round-trips', () => {
   const path = tempStorePath()
-  const env = { ZCODE_CONNECT_CREDENTIAL_SECRET: 'unit-test-seed' }
+  const env = { ZCODE_PROXY_CREDENTIAL_SECRET: 'unit-test-seed' }
   saveCredential(SAMPLE, { env, path })
 
   const loaded = loadCredential({ env, path })
@@ -84,7 +84,7 @@ test('saveCredential then loadCredential round-trips', () => {
 
 test('the stored file never contains the plaintext token', () => {
   const path = tempStorePath()
-  const env = { ZCODE_CONNECT_CREDENTIAL_SECRET: 'unit-test-seed' }
+  const env = { ZCODE_PROXY_CREDENTIAL_SECRET: 'unit-test-seed' }
   saveCredential(SAMPLE, { env, path })
 
   const raw = readFileSync(path, 'utf8')
@@ -94,7 +94,7 @@ test('the stored file never contains the plaintext token', () => {
 
 test('the stored file is owner-only', () => {
   const path = tempStorePath()
-  saveCredential(SAMPLE, { env: { ZCODE_CONNECT_CREDENTIAL_SECRET: 's' }, path })
+  saveCredential(SAMPLE, { env: { ZCODE_PROXY_CREDENTIAL_SECRET: 's' }, path })
   const mode = statSync(path).mode & 0o777
   assert.equal(mode, 0o600, `expected 0600, got ${mode.toString(8)}`)
 })
@@ -105,16 +105,16 @@ test('loadCredential returns undefined when nothing is stored', () => {
 
 test('loadCredential fails loudly with the wrong secret', () => {
   const path = tempStorePath()
-  saveCredential(SAMPLE, { env: { ZCODE_CONNECT_CREDENTIAL_SECRET: 'a' }, path })
+  saveCredential(SAMPLE, { env: { ZCODE_PROXY_CREDENTIAL_SECRET: 'a' }, path })
   assert.throws(
-    () => loadCredential({ env: { ZCODE_CONNECT_CREDENTIAL_SECRET: 'b' }, path }),
+    () => loadCredential({ env: { ZCODE_PROXY_CREDENTIAL_SECRET: 'b' }, path }),
     /wrong secret/,
   )
 })
 
 test('clearCredential removes the file and reports what it did', () => {
   const path = tempStorePath()
-  const env = { ZCODE_CONNECT_CREDENTIAL_SECRET: 's' }
+  const env = { ZCODE_PROXY_CREDENTIAL_SECRET: 's' }
   saveCredential(SAMPLE, { env, path })
 
   assert.equal(clearCredential({ path }), true)
@@ -123,7 +123,7 @@ test('clearCredential removes the file and reports what it did', () => {
 
 test('describeCredential reports presence without leaking the secret', () => {
   const path = tempStorePath()
-  const env = { ZCODE_CONNECT_CREDENTIAL_SECRET: 's' }
+  const env = { ZCODE_PROXY_CREDENTIAL_SECRET: 's' }
   saveCredential(SAMPLE, { env, path })
 
   const described = describeCredential({ env, path })

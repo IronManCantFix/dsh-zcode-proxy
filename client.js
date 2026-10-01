@@ -2,13 +2,13 @@
 // The host serves this file to the page as a plain script, so it has to
 // register itself with __ModuleLoader__; see client/build.mjs for why.
 window.__ModuleLoader__.load({
-  id: "dsh-zcode-connect",
+  id: "dsh-zcode-proxy",
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
 
     /**
-     * Settings card for ZCode Connect.
+     * Settings card for ZCode Proxy.
      *
      * Loaded by the host through `dsh.client`; `package.json` points `exports["./client"]`
      * at the generated `client.js`, which registers itself with
@@ -36,12 +36,12 @@ window.__ModuleLoader__.load({
     const { createElement: h, useCallback, useEffect, useRef, useState } = require('react')
 
     const ROUTES = {
-      status: '/plugins/dsh-zcode-connect/status',
-      login: '/plugins/dsh-zcode-connect/login',
-      logout: '/plugins/dsh-zcode-connect/logout',
+      status: '/plugins/dsh-zcode-proxy/status',
+      login: '/plugins/dsh-zcode-proxy/login',
+      logout: '/plugins/dsh-zcode-proxy/logout',
     }
 
-    const name = 'dsh-zcode-connect-client'
+    const name = 'dsh-zcode-proxy-client'
     const inject = ['slots', 'locale']
 
     /**
@@ -491,7 +491,7 @@ window.__ModuleLoader__.load({
         ctx.slots.register(
           {
             name: 'settings.section',
-            id: 'zcode-connect',
+            id: 'zcode-proxy',
             order: 441,
             label: () => 'ZCode',
             // The slot's `inject` supplies the props the component receives. The

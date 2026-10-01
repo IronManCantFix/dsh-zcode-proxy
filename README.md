@@ -1,4 +1,4 @@
-# dsh-zcode-connect
+# dsh-zcode-proxy
 
 把 GLM 编码套餐（Z.AI / 智谱 BigModel）接进 DeepSeek Harness，作为一个模型 provider。
 
@@ -17,58 +17,51 @@
 
 ## 安装
 
-### 方式一：GUI 里从 GitHub 安装（DSH Desktop）
-
-**设置 → 插件 → 安装插件 → 从 GitHub 安装**，填：
-
-```
-IronManCantFix/dsh-zcode-proxy
-```
-
-装完**重启 DSH Desktop**。
-
-### 方式二：命令行
+`dsh plugin` 把参数原样转发给 profile 目录里的 pnpm，子命令就是 pnpm 的子命令：
 
 ```bash
-dsh plugin --profile desktop add github:IronManCantFix/dsh-zcode-proxy
+# 安装（--profile 是必填项，必须放在 plugin 后面）
+dsh plugin --profile web add github:IronManCantFix/dsh-zcode-proxy
+
+# 查看该 profile 已安装的插件（转发给 pnpm list）
+dsh plugin --profile web list
+
+# 升级：重新 add 一次，带上新 tag
+dsh plugin --profile web add github:IronManCantFix/dsh-zcode-proxy#v0.0.13
+
+# 卸载
+dsh plugin --profile web remove dsh-zcode-proxy
 ```
 
-### 方式三：手工装进 profile
+装完**重启 DSH**。
 
-DSH Desktop 的插件装在 profile 目录里（`~/.dsh/profiles/desktop`）。如果上面两种入口都不可用：
-
-```bash
-cd ~/.dsh/profiles/desktop
-pnpm add github:IronManCantFix/dsh-zcode-proxy
-# 再把 "dsh-zcode-connect" 加进 package.json 的 dsh.profile.bundles
-pnpm install
-```
+> **注意**：`--profile desktop` 只能由 DSH Desktop（Electron 应用）自己管理，命令行传 desktop 会直接报错；桌面版请用设置里的插件面板安装，命令行方式适用于 web、tui 等其他 profile。
 
 安装完成后在 DSH 里：**设置 → 插件 → ZCode → Sign in**。
 
 浏览器会打开授权页，同意后插件自动拿到凭据并保存。模型选择器里随即出现 **ZCode** 分组。
 
-> **凭据存储建议**：设一个 `ZCODE_CONNECT_CREDENTIAL_SECRET` 环境变量。不设时用的是机器派生种子，那只是混淆不是保护（见「环境变量」一节）。
+> **凭据存储建议**：设一个 `ZCODE_PROXY_CREDENTIAL_SECRET` 环境变量。不设时用的是机器派生种子，那只是混淆不是保护（见「环境变量」一节）。
 
 ### 首次自检
 
 包里自带 CLI，不依赖 `dsh` 命令：
 
 ```bash
-zcode-connect status   # 看配置，不发网络请求
-zcode-connect doctor   # 完整体检，含一次真实调用
+zcode-proxy status   # 看配置，不发网络请求
+zcode-proxy doctor   # 完整体检，含一次真实调用
 ```
 
 ## 命令行
 
 ```bash
-zcode-connect login [--provider zai|bigmodel]   # 浏览器授权登录
-zcode-connect logout                            # 清除已保存凭据
-zcode-connect status                            # 看配置（不发网络请求）
-zcode-connect doctor                            # 完整体检（含一次真实调用）
-zcode-connect quota                             # 额度快照
-zcode-connect models                            # 当前账号可用的模型
-zcode-connect refresh-identity                  # 从本机 ZCode 重新提取身份提示词
+zcode-proxy login [--provider zai|bigmodel]   # 浏览器授权登录
+zcode-proxy logout                            # 清除已保存凭据
+zcode-proxy status                            # 看配置（不发网络请求）
+zcode-proxy doctor                            # 完整体检（含一次真实调用）
+zcode-proxy quota                             # 额度快照
+zcode-proxy models                            # 当前账号可用的模型
+zcode-proxy refresh-identity                  # 从本机 ZCode 重新提取身份提示词
 ```
 
 所有命令都支持 `--json`。
@@ -90,7 +83,7 @@ GET  {origin}/api/v1/oauth/cli/poll/{flow_id}
   完成   → {"data":{"status":"ready", token, <provider>: { access_token }}}
 ```
 
-凭据保存在 `$DSH_HOME/zcode-connect/credentials.json`，AES-256-GCM 加密，权限 `0600`。
+凭据保存在 `$DSH_HOME/zcode-proxy/credentials.json`，AES-256-GCM 加密，权限 `0600`。
 
 ### 身份提示词
 
@@ -134,7 +127,7 @@ GET {origin}/api/v1/zcode-plan/billing/balance
 
 | 路径 | 用途 | 必需 |
 |---|---|---|
-| `$DSH_HOME/zcode-connect/credentials.json` | 本插件自己的凭据 | 是 |
+| `$DSH_HOME/zcode-proxy/credentials.json` | 本插件自己的凭据 | 是 |
 | `/Applications/ZCode.app/.../glm/zcode.cjs` | 仅在 `refresh-identity` 时读取 | 否 |
 
 **运行时不会读取 ZCode 的任何文件。** 只有你主动执行 `refresh-identity` 时才会去读本机 ZCode 安装。
@@ -143,7 +136,7 @@ GET {origin}/api/v1/zcode-plan/billing/balance
 
 | 变量 | 说明 |
 |---|---|
-| `ZCODE_CONNECT_CREDENTIAL_SECRET` | 存储加密种子。**不设置时用机器派生值，那只是混淆不是保护** |
+| `ZCODE_PROXY_CREDENTIAL_SECRET` | 存储加密种子。**不设置时用机器派生值，那只是混淆不是保护** |
 | `DSH_HOME` | DSH 主目录，默认 `~/.dsh` |
 | `ZCODE_HOME` | ZCode 数据目录，仅 `refresh-identity` 相关路径使用 |
 
