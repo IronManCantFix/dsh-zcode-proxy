@@ -150,6 +150,118 @@ test('summarize accepts camelCase spellings', () => {
   assert.equal(summary.buckets[0].planName, 'Plan One')
 })
 
+/**
+ * A granted-but-not-yet-active plan must not read as "no quota".
+ *
+ * This is the live 0.2.x-era payload: a promotion credits the account, the
+ * grants land under `plans[].entitlements[]` with a future `effective_at`,
+ * and `balances[]` stays empty until the grant starts. Reading only
+ * `balances` told the user
+ *
+ *     上游未返回任何额度桶
+ *
+ * for an account holding 500M tokens — the worst kind of wrong, because it
+ * looks like a plugin bug rather than a schedule.
+ */
+const PENDING_GRANT_PAYLOAD = {
+  server_time: 1792762333,
+  plans: [
+    {
+      plan_id: 'zcode-v3-start-plan-1024',
+      name: 'ZCode 1024 Dev Day',
+      status: 'active',
+      starts_at: 1792757874,
+      ends_at: 1792976400,
+      entitlements: [
+        {
+          entitlement_id: 'ent-1',
+          show_name: 'GLM-5.3-Flash',
+          unit_type: 'token',
+          capabilities: ['model:glm-5.3-flash'],
+          grant_units: 300_000_000,
+          period: 'one_time',
+          effective_at: 1792767600,
+        },
+        {
+          entitlement_id: 'ent-2',
+          show_name: 'GLM-5.3',
+          unit_type: 'token',
+          capabilities: ['model:glm-5.3'],
+          grant_units: 200_000_000,
+          period: 'one_time',
+          effective_at: 1792767600,
+        },
+      ],
+    },
+  ],
+  balances: [],
+}
+
+test('summarize falls back to plan entitlements when balances is empty', () => {
+  const summary = summarize(PENDING_GRANT_PAYLOAD)
+
+  assert.equal(summary.buckets.length, 2, 'both granted entitlements must be reported')
+  assert.deepEqual(
+    summary.buckets.map((bucket) => bucket.label).sort(),
+    ['GLM-5.3', 'GLM-5.3-Flash'],
+  )
+  // `grant_units` is the grant row's total; without reading it the bar would
+  // claim 0/0 rather than 300M granted.
+  assert.equal(summary.buckets.find((b) => b.label === 'GLM-5.3-Flash').total, 300_000_000)
+  assert.equal(summary.buckets.find((b) => b.label === 'GLM-5.3').total, 200_000_000)
+  assert.equal(
+    summary.buckets.find((b) => b.label === 'GLM-5.3').effectiveAt,
+    1792767600,
+    'effective_at must be carried through so the card can state the start time',
+  )
+  assert.ok(
+    summary.warnings.some((warning) => warning.includes('has not started yet')),
+    'a future grant must be described as pending, not as missing quota',
+  )
+  assert.ok(
+    !summary.warnings.some((warning) => warning.includes('no quota buckets')),
+    'the "no buckets" warning would be false here — the grants exist',
+  )
+})
+
+test('summarize still reports genuinely empty upstream', () => {
+  // No plans, no balances: this really is "nothing granted".
+  const summary = summarize({ server_time: 1792762333, plans: [], balances: [] })
+  assert.equal(summary.buckets.length, 0)
+  assert.ok(summary.warnings.some((warning) => warning.includes('no quota buckets')))
+})
+
+test('summarize prefers live balances over grant rows', () => {
+  // Once the grant starts, upstream populates `balances`; those carry real
+  // usage and must win, with no duplicate bucket from the entitlement list.
+  const summary = summarize({
+    server_time: 1792768000,
+    plans: PENDING_GRANT_PAYLOAD.plans,
+    balances: [
+      {
+        bucket_id: 'b1',
+        plan_id: 'zcode-v3-start-plan-1024',
+        show_name: 'GLM-5.3',
+        unit_type: 'token',
+        capabilities: ['model:glm-5.3'],
+        total_units: 200_000_000,
+        used_units: 50_000_000,
+        remaining_units: 150_000_000,
+      },
+    ],
+  })
+  assert.equal(summary.buckets.length, 1, 'live balances must not be doubled by entitlements')
+  assert.equal(summary.buckets[0].remaining, 150_000_000)
+  assert.ok(!summary.warnings.some((warning) => warning.includes('has not started yet')))
+})
+
+test('grantedModelIds sees entitlements even before the grant starts', () => {
+  // The model picker reads this list; an account whose grant has not started
+  // must still show its models, or the provider looks empty.
+  const summary = summarize(PENDING_GRANT_PAYLOAD)
+  assert.deepEqual(grantedModelIds(summary).sort(), ['glm-5.3', 'glm-5.3-flash'])
+})
+
 test('summarize warns when upstream reports nothing', () => {
   const summary = summarize({})
   assert.equal(summary.buckets.length, 0)

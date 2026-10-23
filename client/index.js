@@ -69,6 +69,12 @@ const TEXT = {
   quota: { zh: '额度', en: 'Quota' },
   noBuckets: { zh: '上游未返回任何额度桶。', en: 'No quota buckets reported by upstream.' },
   resets: { zh: '重置于', en: 'resets' },
+  startsAt: { zh: '生效于', en: 'starts' },
+  notStartedShort: { zh: '未生效', en: 'not active yet' },
+  notStarted: {
+    zh: '额度已授予，但尚未到生效时间；到点后自动可用，无需操作。',
+    en: 'Quota is granted but not active yet. It becomes usable automatically at the time below.',
+  },
   signInAs: { zh: '登录', en: 'Sign in' },
   finishAuth: { zh: '请在弹出的标签页中完成授权：', en: 'Finish the authorization in the tab that just opened:' },
   noJwt: {
@@ -492,20 +498,44 @@ export function ZcodeCard(props = {}) {
               ? h('p', { key: 'error', style: STYLES.error }, quota.error)
               : !quota.buckets || quota.buckets.length === 0
                 ? h('p', { key: 'empty', style: STYLES.note }, text('noBuckets'))
-                : quota.buckets.map((bucket, index) =>
-                    Section({
+                : quota.buckets.map((bucket, index) => {
+                    // A grant can exist while its `effective_at` is still in the
+                    // future. Rendering it as a normal 100% bar would claim the
+                    // quota is spendable when the upstream will refuse the call,
+                    // so a pending grant is labelled with its start time instead.
+                    const pending =
+                      Number.isFinite(bucket.effectiveAt) &&
+                      bucket.effectiveAt * 1000 > Date.now()
+                    return Section({
                       key: `bucket-${index}`,
                       children: [
-                        row(bucket.label, `${bucket.remainingText} / ${bucket.totalText} (${bucket.percent}%)`),
-                        bar(bucket.percent),
+                        row(
+                          bucket.label,
+                          pending
+                            ? `${bucket.totalText} (${text('notStartedShort')})`
+                            : `${bucket.remainingText} / ${bucket.totalText} (${bucket.percent}%)`,
+                        ),
+                        pending ? null : bar(bucket.percent),
                         h(
                           'p',
                           { key: 'plan', style: STYLES.note },
-                          `${bucket.planName}${bucket.periodEnd ? ` · ${text('resets')} ${formatTime(bucket.periodEnd)}` : ''}`,
+                          [
+                            bucket.planName,
+                            pending
+                              ? `${text('startsAt')} ${formatTime(bucket.effectiveAt)}`
+                              : bucket.periodEnd
+                                ? `${text('resets')} ${formatTime(bucket.periodEnd)}`
+                                : undefined,
+                          ]
+                            .filter(Boolean)
+                            .join(' · '),
                         ),
+                        pending
+                          ? h('p', { key: 'pending', style: STYLES.warning }, text('notStarted'))
+                          : null,
                       ],
-                    }),
-                  ),
+                    })
+                  }),
             // Trust Build is claim-based and never appears in the balance
             // response until it has been claimed in the ZCode client, so an
             // account that owns it but has not claimed it looks identical to

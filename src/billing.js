@@ -37,6 +37,7 @@ import { storeDirectory } from './store.js'
  * @property {number | undefined} periodStart
  * @property {number | undefined} periodEnd
  * @property {number | undefined} expiresAt
+ * @property {number | undefined} effectiveAt  When this grant starts being usable; undefined when upstream did not say.
  */
 
 /**
@@ -229,6 +230,24 @@ export async function fetchQuota(options) {
 /**
  * Turn a raw envelope into the shape the card consumes.
  *
+ * Two upstream shapes have to be understood, not just one.
+ *
+ * `balances[]` is the usage plane, but it is only populated for entitlements
+ * that are already *live*. A freshly granted plan — the common case right after
+ * a promotion is credited — reports its grants under `plans[].entitlements[]`
+ * and leaves `balances` as an empty array:
+ *
+ *     {"code":0,"data":{"server_time":…,"plans":[{"entitlements":[
+ *        {"show_name":"GLM-5.3","grant_units":200000000,
+ *         "effective_at":1792767600,"capabilities":["model:glm-5.3"]}]}],
+ *      "balances":[]}}
+ *
+ * Reading only `balances` therefore told the user "上游未返回任何额度桶" for an
+ * account that plainly had 500M tokens granted — the grants simply had not
+ * started yet. When `balances` is empty, the entitlements are folded in as
+ * not-yet-started buckets, and `effective_at` is carried so the card can say
+ * *when* the quota becomes usable instead of implying there is none.
+ *
  * @param {any} data
  * @param {string[]} warnings
  * @returns {QuotaSummary}
@@ -238,12 +257,17 @@ export function summarize(data, warnings = []) {
   const planNames = new Map()
   /** @type {Array<{ planId: string, name: string, status: string, endsAt?: number }>} */
   const plans = []
+  /** @type {Map<string, Array<any>>} */
+  const planEntitlements = new Map()
 
   const rawPlans = Array.isArray(data?.plans) ? data.plans : []
   for (const plan of rawPlans) {
     const planId = readString(plan, 'plan_id', 'planId') ?? 'unknown'
     const name = readString(plan, 'name') ?? planId
     planNames.set(planId, name)
+    if (Array.isArray(plan?.entitlements)) {
+      planEntitlements.set(planId, plan.entitlements)
+    }
     plans.push({
       planId,
       name,
@@ -253,43 +277,88 @@ export function summarize(data, warnings = []) {
   }
 
   const rawBalances = Array.isArray(data?.balances) ? data.balances : []
+  const buckets = rawBalances.map((bucket, index) => toBucket(bucket, index, planNames))
+
   if (rawBalances.length === 0) {
-    warnings.push('upstream reported no quota buckets')
+    // No usage rows. Fall back to the grant rows so an account that *has*
+    // quota is never described as having none. Usage is genuinely unknown
+    // before the grant starts, so `used` stays 0 and the bucket is marked
+    // pending rather than pretending to be fully available.
+    const pending = [...planEntitlements.entries()].flatMap(([planId, entitlements]) =>
+      entitlements.map((entitlement, index) =>
+        toBucket({ ...entitlement, plan_id: planId }, index, planNames),
+      ),
+    )
+
+    if (pending.length > 0) {
+      buckets.push(...pending)
+      const now = readNumber(data, 'server_time', 'serverTime')
+      const notStarted = pending.filter(
+        (bucket) => bucket.effectiveAt !== undefined && now !== undefined && bucket.effectiveAt > now,
+      )
+      if (notStarted.length > 0) {
+        const first = Math.min(...notStarted.map((bucket) => bucket.effectiveAt))
+        warnings.push(
+          `quota has not started yet: ${notStarted.length} entitlement(s) become usable at ` +
+            `${new Date(first * 1000).toISOString()}`,
+        )
+      }
+    } else {
+      warnings.push('upstream reported no quota buckets')
+    }
   }
 
-  /** @type {QuotaBucket[]} */
-  const buckets = rawBalances.map((bucket, index) => {
-    const planId = readString(bucket, 'plan_id', 'planId') ?? 'unknown'
-    const total = readNumber(bucket, 'total_units', 'totalUnits') ?? 0
-    const used = readNumber(bucket, 'used_units', 'usedUnits') ?? 0
-    const remaining =
-      readNumber(bucket, 'remaining_units', 'remainingUnits') ??
-      readNumber(bucket, 'available_units', 'availableUnits') ??
-      Math.max(total - used, 0)
-
-    return {
-      id:
-        readString(bucket, 'bucket_id', 'bucketId') ??
-        readString(bucket, 'entitlement_id', 'entitlementId') ??
-        `bucket-${index}`,
-      label: readString(bucket, 'show_name', 'showName') ?? 'unknown',
-      planId,
-      planName: planNames.get(planId) ?? planId,
-      total,
-      used,
-      remaining,
-      available: readNumber(bucket, 'available_units', 'availableUnits') ?? remaining,
-      unit: readString(bucket, 'unit_type', 'unitType') ?? 'unit',
-      capabilities: Array.isArray(bucket?.capabilities)
-        ? bucket.capabilities.filter((entry) => typeof entry === 'string')
-        : [],
-      periodStart: readNumber(bucket, 'period_start', 'periodStart'),
-      periodEnd: readNumber(bucket, 'period_end', 'periodEnd'),
-      expiresAt: readNumber(bucket, 'expires_at', 'expiresAt'),
-    }
-  })
-
   return { fetchedAt: Date.now(), buckets, plans, warnings }
+}
+
+/**
+ * Build one bucket from either a `balances[]` row or a `plans[].entitlements[]`
+ * grant row.
+ *
+ * The two share most field names (`show_name`, `unit_type`, `capabilities`) but
+ * differ in the totals: a balance row reports `total_units`, a grant row reports
+ * `grant_units`. Both are read, so one shape's absence does not read as zero.
+ *
+ * @param {any} source
+ * @param {number} index
+ * @param {Map<string, string>} planNames
+ * @returns {QuotaBucket}
+ */
+function toBucket(source, index, planNames) {
+  const planId = readString(source, 'plan_id', 'planId') ?? 'unknown'
+  const total =
+    readNumber(source, 'total_units', 'totalUnits') ??
+    readNumber(source, 'grant_units', 'grantUnits') ??
+    0
+  const used = readNumber(source, 'used_units', 'usedUnits') ?? 0
+  const remaining =
+    readNumber(source, 'remaining_units', 'remainingUnits') ??
+    readNumber(source, 'available_units', 'availableUnits') ??
+    Math.max(total - used, 0)
+
+  return {
+    id:
+      readString(source, 'bucket_id', 'bucketId') ??
+      readString(source, 'entitlement_id', 'entitlementId') ??
+      `bucket-${index}`,
+    label: readString(source, 'show_name', 'showName') ?? 'unknown',
+    planId,
+    planName: planNames.get(planId) ?? planId,
+    total,
+    used,
+    remaining,
+    available: readNumber(source, 'available_units', 'availableUnits') ?? remaining,
+    unit: readString(source, 'unit_type', 'unitType') ?? 'unit',
+    capabilities: Array.isArray(source?.capabilities)
+      ? source.capabilities.filter((entry) => typeof entry === 'string')
+      : [],
+    periodStart: readNumber(source, 'period_start', 'periodStart'),
+    periodEnd: readNumber(source, 'period_end', 'periodEnd'),
+    expiresAt: readNumber(source, 'expires_at', 'expiresAt'),
+    // Carried so the card can distinguish "granted and usable" from "granted
+    // but not started yet". Undefined means the upstream did not say.
+    effectiveAt: readNumber(source, 'effective_at', 'effectiveAt'),
+  }
 }
 
 /**

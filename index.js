@@ -288,6 +288,9 @@ async function buildStatus(extra = {}) {
           percent: bucket.total > 0 ? Math.round((bucket.remaining / bucket.total) * 100) : 0,
           periodEnd: bucket.periodEnd,
           expiresAt: bucket.expiresAt,
+          // Carried through so the card can say "starts at …" for a grant that
+          // exists but is not usable yet, instead of showing a misleading 100%.
+          effectiveAt: bucket.effectiveAt,
         })),
         plans: summary.plans,
         warnings: summary.warnings,
