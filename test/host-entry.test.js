@@ -487,3 +487,221 @@ test('the host entry exposes the installed package version', () => {
       'version that need not match the installed files.',
   )
 })
+
+/**
+ * A second mount of the same package must not be able to kill the host.
+ *
+ * DSH 0.2.1-rc.2 enforces single-owner registries and reports a second owner as
+ * a hard failure. On the real Desktop host the bundle row and the market's
+ * hot-mount row both loaded this package, and the adapter registration — which
+ * happens inside a promise, after `apply` has returned — rejected with
+ *
+ *     LlmError: an adapter for provider "zcode" is already registered
+ *
+ * Because nothing awaited that promise, it surfaced as an *unhandled rejection*,
+ * which the harness escalates to `dsh: fatal load failure` and exit code 1:
+ *
+ *     [harness-node] unhandled rejection: LlmError: ...
+ *     dsh: fatal load failure: LlmError: an adapter for provider "zcode" is already registered
+ *
+ * So every registration `apply` performs is exercised here against a host stub
+ * that refuses a second owner exactly like the real one, and the assertions are
+ * that (a) `apply` returns cleanly, (b) no rejection escapes, and (c) the
+ * duplicate is reported instead of silently swallowed.
+ */
+function makeHostStub() {
+  const warnings = []
+  const adapters = new Map()
+  const directory = new Map()
+  const discoveries = new Map()
+  const routes = new Map()
+
+  const ctx = {
+    llm: {
+      listProviders: () => [...adapters.values()].map(({ id }) => ({ id, name: id })),
+      listConfigurableProviders: () => [...directory.values()].map((entry) => ({ ...entry })),
+      registerAdapter: (providers, adapter) => {
+        for (const provider of providers) {
+          if (adapters.has(provider)) {
+            throw new Error(`an adapter for provider "${provider}" is already registered`)
+          }
+        }
+        for (const provider of providers) adapters.set(provider, { id: provider, adapter })
+        return () => {
+          for (const provider of providers) adapters.delete(provider)
+        }
+      },
+      registerConfigurableProviders: (entries) => {
+        for (const entry of entries) {
+          if (directory.has(entry.provider)) {
+            throw new Error(`configurable provider "${entry.provider}" is already declared`)
+          }
+        }
+        for (const entry of entries) directory.set(entry.provider, entry)
+        return () => {
+          for (const entry of entries) directory.delete(entry.provider)
+        }
+      },
+      registerModelDiscovery: (settingsNs, discover) => {
+        if (discoveries.has(settingsNs)) {
+          throw new Error(`model discovery for "${settingsNs}" is already registered`)
+        }
+        discoveries.set(settingsNs, discover)
+        return () => discoveries.delete(settingsNs)
+      },
+    },
+    settings: {
+      configure: () => () => {},
+    },
+    effect: (execute) => {
+      const disposer = execute()
+      return typeof disposer === 'function' ? disposer : () => {}
+    },
+    inject: (_services, run) => {
+      const webCtx = {
+        effect: (execute) => {
+          const disposer = execute()
+          return typeof disposer === 'function' ? disposer : () => {}
+        },
+        webServer: {
+          register: (route) => {
+            if (routes.has(route.path)) {
+              throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+            }
+            routes.set(route.path, route)
+            return () => routes.delete(route.path)
+          },
+        },
+      }
+      return run(webCtx)
+    },
+    fiber: {},
+  }
+
+  return { ctx, adapters, directory, discoveries, routes, warnings }
+}
+
+test('a second mount of the package cannot fail the host boot', async () => {
+  const host = makeHostStub()
+  const originalWarn = console.warn
+  const warnings = []
+  console.warn = (...args) => warnings.push(args.join(' '))
+
+  try {
+    // Two mounts, exactly like a bundle row plus the market's hot-mount row.
+    entry.apply(host.ctx)
+    entry.apply(host.ctx)
+    // The adapter registration is asynchronous; give it a turn to settle so an
+    // escaping rejection would surface here rather than in the host.
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(
+    [...host.adapters.keys()],
+    ['zcode'],
+    'exactly one adapter route must remain registered',
+  )
+  assert.deepEqual([...host.directory.keys()], ['zcode'], 'exactly one configurable provider must remain')
+  assert.deepEqual([...host.discoveries.keys()], [entry.SETTINGS_NS], 'exactly one discovery must remain')
+  assert.deepEqual(
+    [...host.routes.keys()].sort(),
+    [entry.ROUTES.status, entry.ROUTES.models, entry.ROUTES.logout, entry.ROUTES.login].sort(),
+    'the first mount must keep serving every route it registers',
+  )
+  assert.ok(
+    warnings.some((line) => line.includes('skipped')),
+    'a skipped duplicate must be reported, not silently swallowed',
+  )
+})
+
+/**
+ * The duplicate path must be *quiet*, not fatal, and must not leave the host
+ * believing a provider is live when it is not.
+ *
+ * `apply` is allowed to return without registering when another live instance
+ * owns the provider. What it may never do is throw — cordis turns a throwing
+ * `apply` into `1 required plugin did not activate`, and the host refuses to
+ * boot.
+ */
+test('apply never throws when every registry is already owned', () => {
+  const host = makeHostStub()
+  const originalWarn = console.warn
+  console.warn = () => {}
+
+  try {
+    // Pre-own every surface, then apply twice more.
+    host.ctx.llm.registerAdapter(['zcode'], { providerInfo: () => ({ id: 'zcode', name: 'ZCode' }) })
+    host.ctx.llm.registerConfigurableProviders([
+      { provider: 'zcode', displayName: 'ZCode', settingsNs: entry.SETTINGS_NS, settingsPath: [] },
+    ])
+    host.ctx.llm.registerModelDiscovery(entry.SETTINGS_NS, async () => [])
+
+    assert.doesNotThrow(() => entry.apply(host.ctx))
+    assert.doesNotThrow(() => entry.apply(host.ctx))
+  } finally {
+    console.warn = originalWarn
+  }
+})
+
+/**
+ * The declared DSH peer range must admit the 0.2 line.
+ *
+ * 0.2.x hosts enforce the plugin's `engines.dsh` / DSH peers at install and at
+ * startup. The old `>=0.1.5-rc.1 <0.2.0` excluded every 0.2 build, so the
+ * installer refused the package outright:
+ *
+ *     dsh: installation rejected: Plugin dsh-zcode-proxy@0.0.13 declares Harness
+ *     peerDependencies {"engines.dsh":">=0.1.5-rc.1 <0.2.0"} that do not include dsh 0.2.1-rc.2
+ *
+ * `^0.2.0` is not a fix either: with `includePrerelease` it expands to
+ * `>=0.2.0 <0.3.0-0`, which a `0.2.1-rc.2` prerelease does not satisfy. The
+ * range has to be written so prereleases inside the 0.2 window are admitted.
+ */
+test('the declared DSH range admits 0.2 prereleases and keeps 0.1 installable', () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const ranges = [pkg.engines?.dsh, ...Object.entries(pkg.peerDependencies ?? {})
+    .filter(([name]) => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
+    .map(([, range]) => range)]
+    .filter((range) => typeof range === 'string')
+
+  assert.ok(ranges.length > 0, 'the package must declare a DSH range')
+
+  // The host's own checker runs semver with includePrerelease, so these bounds
+  // are evaluated the same way here. A tiny hand-rolled check is not enough:
+  // the prerelease ordering is exactly what broke.
+  const admitted = (range, version) => {
+    // `>=A <B` with a `-0` upper bound is the only form used here; evaluate it
+    // directly so the test does not depend on an installed semver.
+    const match = /^>=([^\s]+)\s+<([^\s]+)$/.exec(range.trim())
+    assert.ok(match !== null, `unexpected range form: ${range}`)
+    const parse = (value) => {
+      const [core, pre] = value.split('-')
+      const [major, minor, patch] = core.split('.').map(Number)
+      return { major, minor, patch, pre: pre ?? '' }
+    }
+    const compare = (a, b) => {
+      for (const key of ['major', 'minor', 'patch']) {
+        if (a[key] !== b[key]) return a[key] - b[key]
+      }
+      // A release sorts above its prereleases; `-0` is the floor of the line.
+      if (a.pre === b.pre) return 0
+      if (a.pre === '') return 1
+      if (b.pre === '') return -1
+      return a.pre < b.pre ? -1 : 1
+    }
+    const candidate = parse(version)
+    return compare(candidate, parse(match[1])) >= 0 && compare(candidate, parse(match[2])) < 0
+  }
+
+  for (const range of ranges) {
+    for (const version of ['0.1.5-rc.1', '0.1.7-rc.2', '0.2.0-rc.1', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1']) {
+      assert.ok(admitted(range, version), `${range} must admit ${version}`)
+    }
+    assert.ok(!admitted(range, '0.3.0'), `${range} must not admit 0.3.0`)
+    // The declared floor must stay where it is: these hosts gained the
+    // services this plugin injects, and an older one cannot satisfy them.
+    assert.ok(!admitted(range, '0.1.0-rc.1'), `${range} must not admit 0.1.0-rc.1`)
+  }
+})

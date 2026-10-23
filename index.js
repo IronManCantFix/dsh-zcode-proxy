@@ -310,6 +310,33 @@ async function buildStatus(extra = {}) {
 }
 
 /**
+ * Register one same-origin route, tolerating an identical route owned by another
+ * live instance of this plugin.
+ *
+ * `webServer.register` throws `webserver: duplicate exact route "<path>"` when a
+ * second owner appears. A duplicate mount of this package would otherwise fail
+ * the *second* plugin's activation — which the host escalates to
+ * `1 required plugin did not activate` and a refused boot. The first mount
+ * already serves the route, so the duplicate is skipped with a warning and a
+ * no-op disposer.
+ *
+ * @param {any} webCtx
+ * @param {any} route
+ * @returns {() => void}
+ */
+function registerRoute(webCtx, route) {
+  try {
+    return webCtx.webServer.register(route)
+  } catch (error) {
+    warnSkippedRegistration(
+      `route ${route.path}`,
+      error instanceof Error ? error.message : String(error),
+    )
+    return () => {}
+  }
+}
+
+/**
  * Register the same-origin routes the card uses.
  *
  * @param {any} ctx
@@ -320,7 +347,7 @@ function registerRoutes(ctx) {
       const disposers = []
 
       disposers.push(
-        webCtx.webServer.register({
+        registerRoute(webCtx, {
           kind: 'exact',
           path: ROUTES.status,
           handler: async (req, res) => {
@@ -340,7 +367,7 @@ function registerRoutes(ctx) {
       )
 
       disposers.push(
-        webCtx.webServer.register({
+        registerRoute(webCtx, {
           kind: 'exact',
           path: ROUTES.models,
           handler: async (req, res) => {
@@ -360,7 +387,7 @@ function registerRoutes(ctx) {
       )
 
       disposers.push(
-        webCtx.webServer.register({
+        registerRoute(webCtx, {
           kind: 'exact',
           path: ROUTES.logout,
           handler: async (req, res) => {
@@ -412,7 +439,7 @@ function registerRoutes(ctx) {
       })
 
       disposers.push(
-        webCtx.webServer.register({
+        registerRoute(webCtx, {
           kind: 'exact',
           path: ROUTES.login,
           handler: async (req, res) => {
@@ -509,8 +536,89 @@ function registerRoutes(ctx) {
   })
 }
 
+/** Deduplicates the warnings below; one line per (surface, reason) per process. */
+const warnedRegistrations = new Set()
+
+/**
+ * Warn once per process about a registration this instance deliberately skipped.
+ *
+ * A duplicate mount is a composition fact, not a plugin bug: it is how the
+ * market hot-mounts a second loader row (`mkt-<id>`) beside the bundle row, and
+ * how a profile ends up with both a bundle row and a hand-written marker row.
+ * The first instance owns the route; the second must step aside quietly enough
+ * not to break the boot, but loudly enough to be diagnosable.
+ *
+ * @param {string} what
+ * @param {string} [reason]
+ */
+function warnSkippedRegistration(what, reason) {
+  const key = `${what}:${reason ?? ''}`
+  if (warnedRegistrations.has(key)) {
+    return
+  }
+  warnedRegistrations.add(key)
+  console.warn(
+    `[dsh-zcode-proxy] ${what} skipped: ${reason ?? 'already registered by another live instance'}. ` +
+      'This happens when the same package is mounted twice (bundle row + hot-mount row, or a ' +
+      'bundle row + a manual marker row in the profile patch); the first instance keeps serving it.',
+  )
+}
+
+/**
+ * Whether a provider route already has an adapter registered by someone.
+ *
+ * `listProviders()` is the host's public, detached view of the adapter
+ * registry, so this is a read, not a probe of an undeclared service.
+ *
+ * @param {any} llm
+ * @returns {boolean}
+ */
+function providerHasAdapter(llm) {
+  try {
+    return llm.listProviders().some((entry) => entry?.id === PROVIDER_ID)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether a configurable provider is already declared by someone.
+ *
+ * @param {any} llm
+ * @returns {boolean}
+ */
+function providerIsDeclared(llm) {
+  try {
+    return llm.listConfigurableProviders().some((entry) => entry?.provider === PROVIDER_ID)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Cordis plugin entry.
+ *
+ * Every registration below is a SINGLE-OWNER host registry, and each one
+ * throws on a second owner:
+ *
+ *   - `llm.registerAdapter`         -> DUPLICATE_ADAPTER
+ *   - `llm.registerConfigurableProviders` -> DUPLICATE_DIRECTORY
+ *   - `llm.registerModelDiscovery`  -> DUPLICATE_DISCOVERY
+ *   - `webServer.register`          -> `webserver: duplicate exact route`
+ *
+ * On DSH 0.2.1-rc.2 a second mount therefore killed the host outright. The
+ * adapter registration is asynchronous, so its rejection escaped as an
+ * *unhandled rejection* — which the harness escalates to
+ * `dsh: fatal load failure` and exit code 1:
+ *
+ *     [harness-node] unhandled rejection: LlmError:
+ *       an adapter for provider "zcode" is already registered
+ *     dsh: fatal load failure: LlmError: ...
+ *
+ * A plugin must never be able to do that to its host. Every registration is
+ * now either skipped when another live instance owns the surface, or contained
+ * and logged. The plugin still refuses to lie: if it cannot register, it says
+ * so on stderr instead of pretending the provider is live.
  *
  * @param {any} ctx
  */
@@ -523,43 +631,86 @@ export function apply(ctx) {
     let releaseAdapter
     let released = false
 
-    Promise.resolve(adapter).then((instance) => {
-      if (released) {
-        return
-      }
-      releaseAdapter = ctx.llm.registerAdapter([PROVIDER_ID], instance)
-    })
+    Promise.resolve(adapter)
+      .then((instance) => {
+        if (released) {
+          return
+        }
+        if (providerHasAdapter(ctx.llm)) {
+          warnSkippedRegistration('adapter registration')
+          return
+        }
+        releaseAdapter = ctx.llm.registerAdapter([PROVIDER_ID], instance)
+      })
+      .catch((error) => {
+        // Never let this escape: an unhandled rejection here is a fatal host
+        // load failure, not a degraded provider.
+        warnSkippedRegistration(
+          'adapter registration',
+          error instanceof Error ? error.message : String(error),
+        )
+      })
 
     return () => {
       released = true
-      releaseAdapter?.()
+      try {
+        releaseAdapter?.()
+      } catch {
+        // A failed disposer must not prevent the rest of the teardown.
+      }
     }
   })
 
-  ctx.effect(() => ctx.llm.registerConfigurableProviders([
-    {
-      provider: PROVIDER_ID,
-      displayName: PROVIDER_NAME,
-      settingsNs: SETTINGS_NS,
-      settingsPath: [],
-      declared: false,
-    },
-  ]))
+  ctx.effect(() => {
+    if (providerIsDeclared(ctx.llm)) {
+      warnSkippedRegistration('configurable-provider declaration')
+      return
+    }
+    return ctx.llm.registerConfigurableProviders([
+      {
+        provider: PROVIDER_ID,
+        displayName: PROVIDER_NAME,
+        settingsNs: SETTINGS_NS,
+        settingsPath: [],
+        declared: false,
+      },
+    ])
+  })
 
-  ctx.effect(() =>
-    ctx.llm.registerModelDiscovery(SETTINGS_NS, async (request) => {
-      if (request?.provider !== undefined && request.provider !== PROVIDER_ID) {
-        return []
-      }
-      return await discoverModels()
-    }),
-  )
+  ctx.effect(() => {
+    try {
+      return ctx.llm.registerModelDiscovery(SETTINGS_NS, async (request) => {
+        if (request?.provider !== undefined && request.provider !== PROVIDER_ID) {
+          return []
+        }
+        return await discoverModels()
+      })
+    } catch (error) {
+      warnSkippedRegistration(
+        'model discovery',
+        error instanceof Error ? error.message : String(error),
+      )
+      return undefined
+    }
+  })
 
   // The settings service gained `configure` in 0.1.7; older hosts expose
   // `installSection` instead. `settings` is declared in `inject`, so the
   // service is guaranteed to be here; only the method may differ.
   if (typeof ctx.settings.configure === 'function') {
-    ctx.effect(() => ctx.settings.configure({ auto: true }, ctx.fiber))
+    ctx.effect(() => {
+      try {
+        return ctx.settings.configure({ auto: true }, ctx.fiber)
+      } catch (error) {
+        // A second mount of the same package configures the same presentation
+        // slot; that is a composition duplicate, not a reason to fail the boot.
+        warnSkippedRegistration(
+          'settings presentation',
+          error instanceof Error ? error.message : String(error),
+        )
+        return undefined
+      }
+    })
   }
 
   registerRoutes(ctx)

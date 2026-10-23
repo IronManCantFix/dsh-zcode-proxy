@@ -15,6 +15,25 @@
 - **不用装 ZCode 客户端** —— 认证是插件自己走的浏览器授权
 - **额度看得见** —— 卡片直接显示剩余 / 总量 / 重置时间
 
+## 兼容性
+
+| DSH 内核 | 状态 |
+|---|---|
+| 0.1.5-rc.1 – 0.1.7-rc.2 | 可用 |
+| 0.2.0-rc.1 – 0.2.1-rc.2 | 可用（0.2.1-rc.2 实测） |
+| 0.3.x | 未验证 |
+
+`package.json` 里声明的是 `>=0.1.5-rc.1 <0.3.0-0`。0.2 系列内核会在安装和启动时校验这个区间，**写窄了会直接被拒绝安装**：
+
+```
+dsh: installation rejected: Plugin dsh-zcode-proxy@... declares Harness peerDependencies
+     {"engines.dsh":">=0.1.5-rc.1 <0.2.0"} that do not include dsh 0.2.1-rc.2
+```
+
+注意 `^0.2.0` 并不是正确的写法：带 `includePrerelease` 时它展开成 `>=0.2.0 <0.3.0-0`，而 `0.2.1-rc.2` 属于预发布版，反而落在区间外。
+
+从 0.2.x 起，内核把 provider 路由、可配置 provider、模型发现和 HTTP 路由都当作**单占主**注册表，第二个占用者会抛错。因此本插件在重复挂载时会跳过已经有人持有的注册项，并打印一行 `[dsh-zcode-proxy] ... skipped` 警告，而不是让整个内核启动失败——这类重复常见于 bundle 行与 market 热挂载行同时存在，或 profile 里还留着旧的手写标记行。
+
 ## 安装
 
 `dsh plugin` 把参数原样转发给 profile 目录里的 pnpm，子命令就是 pnpm 的子命令：
